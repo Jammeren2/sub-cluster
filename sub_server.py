@@ -150,6 +150,35 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "subproxy/1.0"
     protocol_version = "HTTP/1.1"
 
+    def _client_ip(self):
+        """
+        Реальный IP клиента. Если перед нами reverse-proxy (nginx/Caddy/
+        Traefik), сокет показывает IP прокси, а настоящий адрес — в заголовке
+        X-Forwarded-For (берём первый = самый левый) или X-Real-IP.
+        """
+        xff = self.headers.get("X-Forwarded-For")
+        if xff:
+            return xff.split(",")[0].strip()
+        return self.headers.get("X-Real-IP") or self.client_address[0]
+
+    def _log_device(self):
+        """
+        Пишет в консоль контейнера, какое устройство обратилось к подписке
+        и с какого IP. Данные устройства — из заголовков клиента (Happ и пр.).
+        """
+        ip = self._client_ip()
+        hwid = self.headers.get("X-Hwid", "-")
+        model = self.headers.get("X-Device-Model", "-")
+        os_name = self.headers.get("X-Device-Os", "-")
+        app_ver = self.headers.get("X-App-Version", "-")
+        locale = self.headers.get("X-Device-Locale", "-")
+        ua = self.headers.get("User-Agent", "-")
+        print(
+            f"[{self.log_date_time_string()}] DEVICE ip={ip} hwid={hwid} "
+            f"model={model} os={os_name} app={app_ver} locale={locale} ua=\"{ua}\"",
+            flush=True,
+        )
+
     def _respond(self, code, body=b"", headers=None):
         self.send_response(code)
         sent = set()
@@ -169,6 +198,7 @@ class Handler(BaseHTTPRequestHandler):
         target = (SUB_PATH.rstrip("/")) or "/"
 
         if norm == target:
+            self._log_device()
             try:
                 body, up_headers = get_subscription()
             except urllib.error.HTTPError as e:

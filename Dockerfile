@@ -8,8 +8,10 @@ WORKDIR /app
 COPY sub_server.py .
 
 # Внутри контейнера всегда слушаем 0.0.0.0:8080 (наружу маппится через compose).
+# PYTHONUNBUFFERED=1 — чтобы логи сразу попадали в `docker logs`, без буферизации.
 ENV LISTEN_HOST=0.0.0.0 \
-    LISTEN_PORT=8080
+    LISTEN_PORT=8080 \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 8080
 
