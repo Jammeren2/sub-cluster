@@ -1,0 +1,27 @@
+# Приложение слушает порт 2347 на хосте. Домен/HTTPS навесишь сам сверху.
+#
+# Параметры задаются прямо здесь. Значение после ":-" — по умолчанию;
+# его можно переопределить переменной окружения при запуске, например:
+#   SUB_PATH=/s/мойсекрет docker compose up -d
+services:
+  sub-mirror:
+    build: .
+    image: concord-sub-mirror
+    container_name: sub-mirror
+    restart: unless-stopped
+    # Хост:контейнер. Внутри контейнера всегда 8080, наружу — 2347.
+    ports:
+      - "${HOST_PORT:-2347}:8080"
+    environment:
+      LISTEN_HOST: "0.0.0.0"
+      LISTEN_PORT: "8080"
+      # Оригинальная подписка, которую дублируем.
+      UPSTREAM_URL: "${UPSTREAM_URL:-https://sub.by-concord.pro/FwPx2Mt2MyW4hqsE}"
+      # СЕКРЕТНЫЙ путь твоей подписки — поменяй на свой случайный.
+      SUB_PATH: "${SUB_PATH:-/s/CHANGE-ME}"
+      # Кэш ответа upstream, сек.
+      CACHE_TTL: "${CACHE_TTL:-60}"
+      # HWID клиента Happ (обычно менять не нужно).
+      HAPP_HWID: "${HAPP_HWID:-00000000-0000-0000-0000-000000000000}"
+      # Аварийно отключить проверку TLS: INSECURE_TLS=1
+      INSECURE_TLS: "${INSECURE_TLS:-}"
