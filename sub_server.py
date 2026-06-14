@@ -22,6 +22,7 @@ import os
 import ssl
 import gzip
 import time
+import base64
 import threading
 import urllib.request
 import urllib.error
@@ -43,6 +44,9 @@ SUB_PATH = os.environ.get("SUB_PATH", "/sub")
 CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
 # Таймаут запроса к upstream, сек.
 UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "20"))
+# Своё название подписки. Если задано — подменяет Profile-Title от upstream.
+# Пусто = оставляем оригинальное название (Concord).
+PROFILE_TITLE = os.environ.get("PROFILE_TITLE", "")
 
 # Заголовки, которые отправляем на upstream — имитируем клиент Happ.
 # Менять обычно не нужно; HWID/версию можно переопределить через env.
@@ -121,6 +125,11 @@ def fetch_upstream():
             if val is not None:
                 headers[name] = val
         headers.setdefault("Content-Type", "application/json; charset=utf-8")
+        # Подменяем название подписки на своё, если задан PROFILE_TITLE.
+        # Happ ожидает заголовок в виде base64:<база64 от UTF-8 названия>.
+        if PROFILE_TITLE:
+            encoded = base64.b64encode(PROFILE_TITLE.encode("utf-8")).decode("ascii")
+            headers["Profile-Title"] = "base64:" + encoded
         return raw, headers
 
 

@@ -19,6 +19,8 @@ services:
       UPSTREAM_URL: "${UPSTREAM_URL:-https://sub.by-concord.pro/FwPx2Mt2MyW4hqsE}"
       # СЕКРЕТНЫЙ путь твоей подписки — поменяй на свой случайный.
       SUB_PATH: "${SUB_PATH:-/s/CHANGE-ME}"
+      # Своё название подписки (как видно в Happ). Пусто = оригинальное (Concord).
+      PROFILE_TITLE: "${PROFILE_TITLE:-}"
       # Кэш ответа upstream, сек.
       CACHE_TTL: "${CACHE_TTL:-60}"
       # HWID клиента Happ (обычно менять не нужно).
