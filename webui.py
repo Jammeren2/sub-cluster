@@ -203,18 +203,20 @@ def render_cluster(status, sub_base, flash="", flash_err=False):
         actions += (f'<details style="display:inline-block"><summary class="muted" style="cursor:pointer;display:inline">изм.</summary>'
                     f'<form method="post" action="/cluster/nodes/{esc(n["id"])}/update" style="margin-top:6px">'
                     f'<input name="label" value="{esc(n["label"])}" placeholder="метка">'
-                    f'<input name="public_ip" value="{esc(n["public_ip"])}" placeholder="IP" class="mono">'
+                    f'<input name="public_ip" value="{esc(n["public_ip"])}" placeholder="публичный IP (для DNS подписок)" class="mono">'
+                    f'<input name="cluster_url" value="{esc(n.get("cluster_url",""))}" placeholder="https://adminN.домен (адрес для пиров)" class="mono">'
                     f'<input name="priority" value="{esc(n["priority"])}" placeholder="приоритет" type="number">'
-                    f'<input name="cluster_port" value="{esc(n["cluster_port"])}" placeholder="cluster-порт" type="number">'
+                    f'<input name="cluster_port" value="{esc(n["cluster_port"])}" placeholder="cluster-порт (фолбэк по IP)" type="number">'
                     f'<label class="row" style="margin-top:6px"><input type="checkbox" name="enabled" value="1" style="width:auto"{" checked" if n["enabled"] else ""}> <span>включён</span></label>'
                     f'<div style="margin-top:6px"><button class="btn small" type="submit">Сохранить</button></div></form>')
         if not n["is_self"]:
             actions += (f'<form class="inline" method="post" action="/cluster/nodes/{esc(n["id"])}/delete" '
                         f'onsubmit="return confirm(\'Удалить узел?\')"><button class="btn small red" type="submit">×</button></form>')
         actions += "</details>"
+        addr = esc(n.get("cluster_url") or (f'{n["public_ip"]}:{n["cluster_port"]}' if n["public_ip"] else "—"))
         rows.append(
             f'<tr><td>{dot}<b>{esc(n["label"])}</b> {badges}<div class="muted mono">{esc(n["id"])}</div></td>'
-            f'<td class="mono">{esc(n["public_ip"]) or "—"}</td><td>{esc(n["priority"])}</td>'
+            f'<td class="mono">{esc(n["public_ip"]) or "—"}<div class="muted mono">{addr}</div></td><td>{esc(n["priority"])}</td>'
             f'<td>{"да" if n["alive"] else "нет"}<div class="muted">{esc(seen)} · {esc(lat)}</div></td>'
             f'<td>{actions}</td></tr>'
         )
@@ -246,18 +248,20 @@ def render_cluster(status, sub_base, flash="", flash_err=False):
   <div style="margin-top:10px">Авто-фейловер: <b>{"включён" if fo_on else "выключен"}</b> {pin_html}</div>
 </div>
 <div class="card">
-  <table class="tbl"><thead><tr><th>Узел</th><th>IP</th><th>Приоритет</th><th>Живость</th><th>Действия</th></tr></thead>
+  <table class="tbl"><thead><tr><th>Узел / адрес для пиров</th><th>Public IP</th><th>Приоритет</th><th>Живость</th><th>Действия</th></tr></thead>
   <tbody>{''.join(rows)}</tbody></table>
+  <div class="help">«Адрес для пиров» — статичный admin-домен узла (https://adminN.домен) по 443: узлы ходят туда друг к другу, проброс портов не нужен. Public IP используется только для DNS подписок при фейловере.</div>
 </div>
 <div class="card"><div class="route-title">Добавить узел</div>
 <form method="post" action="/cluster/nodes/add" class="grid2" style="margin-top:8px">
   <div><label>Метка</label><input name="label" placeholder="node-2"></div>
-  <div><label>Public IP</label><input name="public_ip" class="mono" placeholder="203.0.113.10"></div>
+  <div><label>Public IP (для DNS подписок)</label><input name="public_ip" class="mono" placeholder="203.0.113.10"></div>
+  <div style="grid-column:1/3"><label>Адрес для пиров (статичный admin-домен)</label><input name="cluster_url" class="mono" placeholder="https://admin2.example.net"></div>
   <div><label>Приоритет (меньше = важнее)</label><input name="priority" type="number" value="100"></div>
-  <div><label>Cluster-порт</label><input name="cluster_port" type="number" value="8083"></div>
+  <div><label>Cluster-порт (фолбэк по IP)</label><input name="cluster_port" type="number" value="8083"></div>
   <div style="grid-column:1/3"><button class="btn" type="submit">Добавить</button></div>
 </form>
-<div class="help">Новый узел сам зарегистрируется, когда запустится с этим NODE_ID и увидит кластер; запись тут — чтобы остальные знали его адрес заранее.</div>
+<div class="help">Узел и сам зарегистрируется, когда запустится с этим NODE_ID и CLUSTER_URL и увидит кластер; запись тут — чтобы остальные знали его адрес заранее.</div>
 </div>
 <div class="card"><div class="route-title">Журнал переключений</div><div style="margin-top:8px">{hist or '<span class="muted">пусто</span>'}</div></div>
 </div></body></html>"""
@@ -267,7 +271,6 @@ def render_cluster(status, sub_base, flash="", flash_err=False):
 def render_settings(settings, sub_base, flash="", flash_err=False, crypto_ok=True, has_regru_pw=False):
     flash_html = f'<div class="flash {"err" if flash_err else ""}">{esc(flash)}</div>' if flash else ""
     dns = settings.get("dns", {})
-    admin_d = dns.get("admin", {})
     sub_d = dns.get("sub", {})
     crypto_warn = "" if crypto_ok else (
         '<div class="flash err">SECRET_KEY не задан или нет cryptography — секреты хранятся в открытом виде. '
@@ -287,16 +290,16 @@ def render_settings(settings, sub_base, flash="", flash_err=False, crypto_ok=Tru
   <label>Пароль reg.ru</label><input name="regru_password" type="password" placeholder="{esc(pw_ph)}">
   <div class="help">IP всех узлов должны быть в белом списке API в настройках аккаунта reg.ru, иначе запросы отклоняются.</div>
 </fieldset>
-<fieldset><legend>Домены (A-записи переключаются на активный узел)</legend>
+<fieldset><legend>Домен подписок (A-запись переключается на активный узел)</legend>
   <div class="grid2">
-    <div><label>Admin: зона</label><input name="admin_zone" value="{esc(admin_d.get('zone',''))}" class="mono"></div>
-    <div><label>Admin: поддомен</label><input name="admin_subdomain" value="{esc(admin_d.get('subdomain',''))}" class="mono"></div>
-    <div><label>Подписки: зона</label><input name="sub_zone" value="{esc(sub_d.get('zone',''))}" class="mono"></div>
-    <div><label>Подписки: поддомен</label><input name="sub_subdomain" value="{esc(sub_d.get('subdomain',''))}" class="mono"></div>
+    <div><label>Зона</label><input name="sub_zone" value="{esc(sub_d.get('zone',''))}" class="mono" placeholder="example.com"></div>
+    <div><label>Поддомен</label><input name="sub_subdomain" value="{esc(sub_d.get('subdomain',''))}" class="mono" placeholder="happ"></div>
   </div>
   <label>Публичная база ссылок подписок</label>
   <input name="sub_public_base" value="{esc(settings.get('sub_public_base',''))}" class="mono" placeholder="https://happ.example.com">
-  <div class="help">Используется только для показа готовых ссылок в панели.</div>
+  <div class="help">reg.ru трогает ТОЛЬКО этот домен (подписки). Admin-домены у каждого узла свои,
+  статичные — их A-записи ты прописываешь вручную, фейловер их не меняет. Адрес узла для
+  пиров (CLUSTER_URL = его admin-домен) задаётся на самом узле и виден на вкладке «Кластер».</div>
 </fieldset>
 <fieldset><legend>Фейловер</legend>
   <label class="row"><input type="checkbox" name="failover_enabled" value="1" style="width:auto"{chk(settings.get('failover_enabled'))}> <span>Авто-фейловер включён</span></label>

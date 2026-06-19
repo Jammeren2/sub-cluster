@@ -122,20 +122,30 @@ def login_register(ip, success):
         _login_fails[ip] = rec
 
 
+def _host_of(url):
+    if not url:
+        return None
+    h = urllib.parse.urlsplit(url if "://" in url else "https://" + url).hostname
+    return h.lower() if h else None
+
+
 def allowed_tls_domains():
-    """FQDN'ы, для которых разрешаем выдачу сертификатов (on-demand TLS Caddy)."""
+    """FQDN'ы, для которых разрешаем выдачу сертификатов (on-demand TLS Caddy):
+    собственный admin-домен этого узла (из CLUSTER_URL/env ADMIN_DOMAIN) и домен подписок."""
     s = STORE.get_settings()
-    dns = s.get("dns") or {}
     out = set()
-    for key in ("admin", "sub"):
-        d = dns.get(key) or {}
-        if d.get("subdomain") and d.get("zone"):
-            out.add(f"{d['subdomain']}.{d['zone']}".lower())
-    base = (s.get("sub_public_base") or "").strip()
-    if base:
-        host = urllib.parse.urlsplit(base if "://" in base else "https://" + base).hostname
-        if host:
-            out.add(host.lower())
+    # собственный admin-домен узла
+    for src in (clustermod.CLUSTER_URL, os.environ.get("ADMIN_DOMAIN", "")):
+        h = _host_of(src)
+        if h:
+            out.add(h)
+    # домен подписок (фейловерный)
+    d = (s.get("dns") or {}).get("sub") or {}
+    if d.get("subdomain") and d.get("zone"):
+        out.add(f"{d['subdomain']}.{d['zone']}".lower())
+    h = _host_of(s.get("sub_public_base") or "")
+    if h:
+        out.add(h)
     return out
 
 
@@ -210,6 +220,31 @@ class _Base(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[{self.log_date_time_string()}] {self.address_string()} {fmt % args}")
 
+    # peer-API кластера (HMAC). Обслуживается и на cluster-порту, и на admin-порту
+    # (чтобы узлы ходили друг к другу через статичный admin-домен по 443).
+    CLUSTER_API_PATHS = ("/cluster/ping", "/cluster/members")
+
+    @staticmethod
+    def is_cluster_api(path):
+        return path in _Base.CLUSTER_API_PATHS or path.startswith("/cluster/state/")
+
+    def _serve_cluster_api(self, path, body):
+        if not CLUSTER.verify(self.headers.get, path, body):
+            self._respond(401, b"unauthorized")
+            return
+        if path == "/cluster/ping":
+            self._json(200, CLUSTER.ping_view())
+        elif path == "/cluster/members":
+            self._json(200, CLUSTER.members_doc())
+        elif path.startswith("/cluster/state/"):
+            key = path.rsplit("/", 1)[-1]
+            if key in ("config", "failover"):
+                self._json(200, STORE.get_meta(key))
+            else:
+                self._respond(404, b"not found")
+        else:
+            self._respond(404, b"not found")
+
 
 # ── admin-сервер ───────────────────────────────────────────────────────────
 class AdminHandler(_Base):
@@ -242,8 +277,12 @@ class AdminHandler(_Base):
         if path == "/tls-check":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             domain = (qs.get("domain", [""])[0] or "").lower()
-            self._respond(200 if domain in allowed_tls_domains() else 404,
-                          b"ok" if domain in allowed_tls_domains() else b"no")
+            allowed = domain in allowed_tls_domains()
+            self._respond(200 if allowed else 404, b"ok" if allowed else b"no")
+            return
+        # peer-API кластера через admin-домен (443) — HMAC, до сессионной проверки.
+        if self.is_cluster_api(path):
+            self._serve_cluster_api(path, self._read_body())
             return
         if path == "/login":
             self._html(200, webui.render_login()) if not self._session() else self._redirect("/")
@@ -362,6 +401,7 @@ class AdminHandler(_Base):
             CLUSTER.add_node({
                 "label": f.get("label", [""])[0].strip(),
                 "public_ip": f.get("public_ip", [""])[0].strip(),
+                "cluster_url": f.get("cluster_url", [""])[0].strip(),
                 "priority": int(f.get("priority", ["100"])[0] or "100"),
                 "cluster_port": int(f.get("cluster_port", [str(CLUSTER_PORT)])[0] or CLUSTER_PORT),
             })
@@ -378,6 +418,7 @@ class AdminHandler(_Base):
             fields = {
                 "label": f.get("label", [""])[0].strip(),
                 "public_ip": f.get("public_ip", [""])[0].strip(),
+                "cluster_url": f.get("cluster_url", [""])[0].strip(),
                 "enabled": ("enabled" in f),
             }
             for numf in ("priority", "cluster_port", "admin_port", "sub_port"):
@@ -414,7 +455,7 @@ class AdminHandler(_Base):
             if pw:  # пустой — не менять
                 dns["regru_password_enc"] = secretbox.encrypt(pw)
             dns.setdefault("provider", "regru")
-            dns["admin"] = {"zone": first("admin_zone"), "subdomain": first("admin_subdomain")}
+            # Фейловерится только домен подписок; admin-домены статичные у каждого узла.
             dns["sub"] = {"zone": first("sub_zone"), "subdomain": first("sub_subdomain")}
             s["sub_public_base"] = first("sub_public_base")
             s["failover_enabled"] = ("failover_enabled" in f)
@@ -468,21 +509,7 @@ class ClusterHandler(_Base):
         if path == "/healthz":
             self._respond(200, b"ok")
             return
-        if not CLUSTER.verify(self.headers.get, path, body):
-            self._respond(401, b"unauthorized")
-            return
-        if path == "/cluster/ping":
-            self._json(200, CLUSTER.ping_view())
-        elif path == "/cluster/members":
-            self._json(200, CLUSTER.members_doc())
-        elif path.startswith("/cluster/state/"):
-            key = path.rsplit("/", 1)[-1]
-            if key in ("config", "failover"):
-                self._json(200, STORE.get_meta(key))
-            else:
-                self._respond(404, b"not found")
-        else:
-            self._respond(404, b"not found")
+        self._serve_cluster_api(path, body)
 
     do_GET = _serve
     do_POST = _serve
@@ -518,7 +545,15 @@ def main():
     if not clustermod.CLUSTER_SECRET:
         print("[!] ВНИМАНИЕ: CLUSTER_SECRET не задан — peer-API кластера отключён.", flush=True)
     if not secretbox.crypto_ready():
-        print("[!] ВНИМАНИЕ: SECRET_KEY не задан/нет cryptography — секреты хранятся открыто.", flush=True)
+        # peer-API доступен и по 443 (admin-домен); конфиг с reg.ru-секретом
+        # не должен лежать в открытом виде — требуем SECRET_KEY в проде.
+        if os.environ.get("ALLOW_PLAINTEXT_SECRETS") == "1":
+            print("[!] ВНИМАНИЕ: SECRET_KEY не задан/нет cryptography — секреты хранятся открыто "
+                  "(разрешено ALLOW_PLAINTEXT_SECRETS=1).", flush=True)
+        else:
+            print("[FATAL] SECRET_KEY не задан или нет cryptography — секреты reg.ru хранились бы "
+                  "открыто. Задай SECRET_KEY (или ALLOW_PLAINTEXT_SECRETS=1 для локального теста).", flush=True)
+            raise SystemExit(1)
 
     print(f"[*] Узел: {CLUSTER.id} (ip={CLUSTER.public_ip or '?'}, приоритет={CLUSTER.priority})", flush=True)
     print(f"[*] БД: {storemod.DB_FILE}", flush=True)

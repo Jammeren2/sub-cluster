@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
             "provider": "regru",
             "regru_username": "",
             "regru_password_enc": "",   # шифр (secretbox)
-            "admin": {"zone": "example.net", "subdomain": "admin"},
+            # Фейловерится только домен подписок; admin-домены статичные у каждого узла.
             "sub": {"zone": "example.com", "subdomain": "happ"},
         },
     },

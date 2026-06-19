@@ -3,14 +3,20 @@
 # Coolify (Traefik). Свой Caddy здесь НЕ нужен (он бы конфликтовал за 80/443).
 #
 # В Coolify после деплоя задай домены сервиса app:
-#   admin.example.net  → порт 8080
-#   happ.example.com       → порт 8081
-# (в Coolify: Service app → Domains, либо переменные SERVICE_FQDN_APP_8080 /
-#  SERVICE_FQDN_APP_8081). Порт 8083 публикуется на хост напрямую — он нужен
-# другим узлам кластера (peer-API) и НЕ должен идти через прокси.
+#   <admin-домен этого узла, напр. admin.example.net> → порт 8080
+#   <домен подписок, happ.example.com>                    → порт 8081
+# (в Coolify: Service app → Domains, либо SERVICE_FQDN_APP_8080 / _8081).
 #
-# Переменные узла (NODE_ID, NODE_PUBLIC_IP, CLUSTER_SECRET, SECRET_KEY,
-# ADMIN_PASSWORD, PEERS, …) задаются в Coolify (Environment Variables).
+# Узлы общаются друг с другом через СТАТИЧНЫЙ admin-домен по 443 (CLUSTER_URL),
+# который и так проксирует Coolify → отдельный порт кластера наружу публиковать
+# НЕ нужно (peer-API доступен на 8080 через admin-домен). Маппинг порта ниже
+# оставлен опционально (фолбэк по IP), для основной схемы он не требуется.
+#
+# Переменные узла (NODE_ID, NODE_PUBLIC_IP, NODE_PRIORITY, CLUSTER_URL,
+# CLUSTER_SECRET, SECRET_KEY, ADMIN_PASSWORD, PEERS) задаются в Coolify (Env Vars).
+# CLUSTER_URL = admin-домен этого узла, напр. https://admin.example.net
+# PEERS = admin-домены ДРУГИХ узлов через запятую, напр.
+#         https://admin2.example.net,https://admin3.example.net
 #
 # Для серверов БЕЗ Coolify используй docker-compose.standalone.yml (там есть Caddy).
 
@@ -33,6 +39,8 @@ services:
       NODE_LABEL: "${NODE_LABEL:-}"
       NODE_PUBLIC_IP: "${NODE_PUBLIC_IP:-}"
       NODE_PRIORITY: "${NODE_PRIORITY:-1}"
+      # Адрес этого узла для пиров (его статичный admin-домен по 443).
+      CLUSTER_URL: "${CLUSTER_URL:-}"
       PEERS: "${PEERS:-}"
       CLUSTER_SECRET: "${CLUSTER_SECRET:-}"
       SECRET_KEY: "${SECRET_KEY:-}"

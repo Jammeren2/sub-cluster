@@ -22,9 +22,8 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - cluster-data:/data
-    ports:
-      # peer-API кластера — доступен другим узлам по публичному IP.
-      - "8083:8083"
+    # Наружу ничего публиковать не нужно: Caddy ходит к app по внутренней сети,
+    # а другие узлы кластера — через ADMIN_DOMAIN по 443 (peer-API на 8080).
     expose:
       - "8080"
       - "8081"
@@ -35,6 +34,11 @@ services:
     restart: unless-stopped
     depends_on:
       - app
+    environment:
+      # Домены берутся из .env: ADMIN_DOMAIN (статичный admin этого узла),
+      # SUB_DOMAIN (общий домен подписок).
+      ADMIN_DOMAIN: "${ADMIN_DOMAIN}"
+      SUB_DOMAIN: "${SUB_DOMAIN}"
     ports:
       - "80:80"
       - "443:443"

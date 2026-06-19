@@ -19,6 +19,7 @@ import json
 import hmac
 import socket
 import hashlib
+import secrets
 import threading
 import urllib.request
 import urllib.error
@@ -35,9 +36,15 @@ CLUSTER_PORT = int(os.environ.get("CLUSTER_PORT", "8083"))
 ADMIN_PORT = int(os.environ.get("ADMIN_PORT", "8080"))
 SUB_PORT = int(os.environ.get("SUB_PORT", "8081"))
 CLUSTER_SECRET = os.environ.get("CLUSTER_SECRET", "")
-CLUSTER_SCHEME = os.environ.get("CLUSTER_SCHEME", "http")  # http между узлами по IP
+CLUSTER_SCHEME = os.environ.get("CLUSTER_SCHEME", "http")  # схема для фолбэка ip:port
+# Публичный адрес ЭТОГО узла для пиров — статичный admin-домен по 443, напр.
+# https://admin1.example.net. Тогда узлы ходят друг к другу через прокси (443),
+# и проброс портов 1753/8083 не нужен (NAT-узлы работают через уже открытый 443).
+CLUSTER_URL = os.environ.get("CLUSTER_URL", "").strip().rstrip("/")
 HTTP_TIMEOUT = int(os.environ.get("CLUSTER_HTTP_TIMEOUT", "6"))
-TS_SKEW = 120
+# Окно валидности подписи peer-запроса. Узкое, т.к. peer-API теперь доступен и по
+# 443 (через admin-домен) — каждый запрос ещё и одноразовый (nonce), см. verify().
+TS_SKEW = int(os.environ.get("CLUSTER_TS_SKEW", "30"))
 
 
 def _seed_bases():
@@ -66,11 +73,13 @@ class Cluster:
         self.sub_port = int(ident.get("sub_port", SUB_PORT))
         self.secret = ident.get("secret", CLUSTER_SECRET)
         self.scheme = ident.get("scheme", CLUSTER_SCHEME)
+        self.cluster_url = ident.get("cluster_url", CLUSTER_URL)
         self.http_timeout = int(ident.get("http_timeout", HTTP_TIMEOUT))
         self.seeds = ident.get("seeds", _seed_bases())
         self._lock = threading.Lock()
         # id -> {alive,last_ok,fails,latency,view(list),active,ts}
         self.liveness = {}
+        self._nonce_seen = {}  # nonce -> expiry (защита от повторного проигрывания)
         self._stop = threading.Event()
         self._thread = None
 
@@ -96,7 +105,8 @@ class Cluster:
         fields = {}
         # инфра-поля: env авторитетен
         for field, val in (("public_ip", self.public_ip), ("cluster_port", self.cluster_port),
-                           ("admin_port", self.admin_port), ("sub_port", self.sub_port)):
+                           ("admin_port", self.admin_port), ("sub_port", self.sub_port),
+                           ("cluster_url", self.cluster_url)):
             if val and (me is None or me.get(field) != val):
                 fields[field] = val
         # UI-поля: только если узла ещё нет или поле отсутствует
@@ -110,36 +120,52 @@ class Cluster:
             self.store.upsert_member(self.id, fields, self.id)
 
     # ── HMAC ──────────────────────────────────────────────────────────────
-    def _sign(self, ts, path, body):
-        msg = ts.encode() + b"\n" + path.encode() + b"\n" + body
+    def _sign(self, ts, nonce, path, body):
+        msg = ts.encode() + b"\n" + nonce.encode() + b"\n" + path.encode() + b"\n" + body
         return hmac.new(self.secret.encode(), msg, hashlib.sha256).hexdigest()
 
     def auth_headers(self, path, body=b""):
         ts = str(int(time.time()))
+        nonce = secrets.token_hex(16)
         return {
             "X-Cl-Ts": ts,
             "X-Cl-Node": self.id,
-            "X-Cl-Sig": self._sign(ts, path, body),
+            "X-Cl-Nonce": nonce,
+            "X-Cl-Sig": self._sign(ts, nonce, path, body),
         }
 
     def verify(self, headers_get, path, body):
-        """headers_get: callable(name)->value (например self.headers.get)."""
+        """headers_get: callable(name)->value. Подпись HMAC + одноразовый nonce
+        в узком окне TS_SKEW — перехваченный запрос нельзя проиграть повторно."""
         if not self.secret:
             return False
         ts = headers_get("X-Cl-Ts") or ""
+        nonce = headers_get("X-Cl-Nonce") or ""
         sig = headers_get("X-Cl-Sig") or ""
-        if not ts or not sig:
+        if not ts or not nonce or not sig:
             return False
         try:
             if abs(time.time() - int(ts)) > TS_SKEW:
                 return False
         except ValueError:
             return False
-        expected = self._sign(ts, path, body)
-        return hmac.compare_digest(expected, sig)
+        if not hmac.compare_digest(self._sign(ts, nonce, path, body), sig):
+            return False
+        now = time.time()
+        with self._lock:
+            for k in [k for k, exp in self._nonce_seen.items() if exp < now]:
+                self._nonce_seen.pop(k, None)
+            if nonce in self._nonce_seen:
+                return False  # повтор
+            self._nonce_seen[nonce] = now + TS_SKEW
+        return True
 
     # ── peer client ───────────────────────────────────────────────────────
     def _peer_base(self, node):
+        # приоритет — статичный admin-домен пира по 443 (через прокси, без проброса портов)
+        url = (node.get("cluster_url") or "").strip().rstrip("/")
+        if url:
+            return url
         ip = node.get("public_ip")
         port = node.get("cluster_port", self.cluster_port)
         if not ip:
@@ -278,21 +304,17 @@ class Cluster:
 
     # ── переключение DNS ──────────────────────────────────────────────────
     def _apply_dns(self, ip):
+        """Переключаем на активный узел ТОЛЬКО домен подписок. Admin-домены у
+        каждого узла свои (статичные) и reg.ru их не трогает."""
         settings = self.store.get_settings()
         prov, err = dns_providers.provider_from_settings(settings, secretbox.decrypt)
         if err or not prov:
             return False, (err or "нет DNS-провайдера"), []
-        results = []
-        for key in ("admin", "sub"):
-            d = settings["dns"].get(key) or {}
-            if not d.get("zone") or not d.get("subdomain"):
-                results.append((key, False, "не настроен домен"))
-                continue
-            r = prov.set_a_record(d["zone"], d["subdomain"], ip)
-            results.append((key, bool(r.ok), r.message))
-        ok = all(r[1] for r in results)
-        msg = "; ".join(f"{k}:{m}" for k, _, m in results)
-        return ok, msg, results
+        d = (settings.get("dns") or {}).get("sub") or {}
+        if not d.get("zone") or not d.get("subdomain"):
+            return False, "не настроен домен подписок", []
+        r = prov.set_a_record(d["zone"], d["subdomain"], ip)
+        return bool(r.ok), f"sub:{r.message}", [("sub", bool(r.ok), r.message)]
 
     def _record_failover(self, node_id, ip, by, ok, msg, pin=None, pin_set=False):
         now = time.time()
@@ -355,7 +377,7 @@ class Cluster:
     def set_node(self, node_id, fields):
         """UI-правка записи узла (label/priority/enabled/public_ip/порты)."""
         clean = {}
-        for k in ("label", "public_ip", "priority", "cluster_port", "admin_port", "sub_port", "enabled"):
+        for k in ("label", "public_ip", "cluster_url", "priority", "cluster_port", "admin_port", "sub_port", "enabled"):
             if k in fields:
                 clean[k] = fields[k]
         if clean:
@@ -367,6 +389,7 @@ class Cluster:
         entry = {
             "label": fields.get("label") or nid,
             "public_ip": fields.get("public_ip", ""),
+            "cluster_url": (fields.get("cluster_url") or "").strip().rstrip("/"),
             "priority": int(fields.get("priority", 100)),
             "cluster_port": int(fields.get("cluster_port", self.cluster_port)),
             "admin_port": int(fields.get("admin_port", self.admin_port)),
@@ -491,6 +514,7 @@ class Cluster:
             out_nodes.append({
                 "id": nid, "label": n.get("label") or nid,
                 "public_ip": n.get("public_ip", ""),
+                "cluster_url": n.get("cluster_url", ""),
                 "priority": n.get("priority", 100),
                 "enabled": n.get("enabled", True),
                 "cluster_port": n.get("cluster_port", self.cluster_port),
