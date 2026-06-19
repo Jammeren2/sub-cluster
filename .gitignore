@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+# Конфиг маршрутов и его volume — локальные, могут содержать секретные пути.
+config.json
+config.json.tmp
+data/

@@ -12,14 +12,24 @@ services:
     # Хост:контейнер. Внутри контейнера всегда 8080, наружу — 2347.
     ports:
       - "${HOST_PORT:-2347}:8080"
+    # Персистентный конфиг маршрутов (созданные в веб-панели подписки).
+    volumes:
+      - ./data:/data
     environment:
       LISTEN_HOST: "0.0.0.0"
       LISTEN_PORT: "8080"
-      # Оригинальная подписка, которую дублируем.
-      UPSTREAM_URL: "${UPSTREAM_URL:-https://sub.by-concord.pro/FwPx2Mt2MyW4hqsE}"
-      # СЕКРЕТНЫЙ путь твоей подписки — поменяй на свой случайный.
-      SUB_PATH: "${SUB_PATH:-/s/CHANGE-ME}"
-      # Своё название подписки (как видно в Happ). Пусто = оригинальное (Concord).
+      # Конфиг маршрутов хранится здесь (в смонтированном volume /data).
+      CONFIG_FILE: "/data/config.json"
+      # ── Веб-панель управления маршрутизированием ──
+      # Путь панели (по умолчанию /admin).
+      ADMIN_PATH: "${ADMIN_PATH:-/admin}"
+      # Логин/пароль панели — ОБЯЗАТЕЛЬНО поменяй.
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin}"
+      # ── Легаси-зеркало (необязательно): если задать оба, при ПЕРВОМ запуске
+      #    создаётся маршрут-зеркало. Дальше всё настраивается в панели. ──
+      UPSTREAM_URL: "${UPSTREAM_URL:-}"
+      SUB_PATH: "${SUB_PATH:-}"
       PROFILE_TITLE: "${PROFILE_TITLE:-}"
       # Кэш ответа upstream, сек.
       CACHE_TTL: "${CACHE_TTL:-60}"

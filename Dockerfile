@@ -9,14 +9,18 @@ COPY sub_server.py .
 
 # Внутри контейнера всегда слушаем 0.0.0.0:8080 (наружу маппится через compose).
 # PYTHONUNBUFFERED=1 — чтобы логи сразу попадали в `docker logs`, без буферизации.
+# CONFIG_FILE — конфиг маршрутов в /data (пробрось как volume, чтобы не терялся).
 ENV LISTEN_HOST=0.0.0.0 \
     LISTEN_PORT=8080 \
+    CONFIG_FILE=/data/config.json \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8080
 
-# Не работаем под root.
-RUN useradd --create-home --uid 10001 app
+# Не работаем под root. /data — для персистентного конфига маршрутов.
+RUN useradd --create-home --uid 10001 app \
+    && mkdir -p /data && chown app:app /data
+VOLUME ["/data"]
 USER app
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=5s \
