@@ -28,7 +28,8 @@ def js_embed(obj):
     return s
 
 
-NAV_ITEMS = [("/", "Граф"), ("/classic", "Список"), ("/cluster", "Кластер"), ("/settings", "Настройки")]
+NAV_ITEMS = [("/", "Граф"), ("/classic", "Список"), ("/cluster", "Кластер"),
+             ("/stats", "Статистика"), ("/settings", "Настройки")]
 
 
 def nav_links(active):
@@ -92,8 +93,11 @@ def render_editor(graph, sub_base, csrf, banner=""):
   <button class="btn" id="addSrc">+ Источник</button>
   <button class="btn" id="addRoute">+ Маршрут</button>
   <button class="btn gray" id="reset">Сбросить вид</button>
+  <button class="btn gray" id="blurToggle">Показать ссылки</button>
+  <button class="btn" id="autosaveToggle">Автосейв: вкл</button>
   <span class="spacer"></span>
-  <button class="btn" id="save">Сохранить</button>
+  <span id="savestat"></span>
+  <button class="btn primary" id="save">Сохранить</button>
 </div>
 {banner}
 <div id="editor">
@@ -117,6 +121,7 @@ def render_route_card(route, sub_base):
     enabled = route.get("enabled", True)
     upstreams = route.get("upstreams", [])
     ups_text = esc("\n".join(upstreams))
+    custom_text = esc(route.get("custom_text", "") or "")
     full_url = esc(sub_base.rstrip("/") + (route.get("path", "") or ""))
     state = '<span class="tag on">включён</span>' if enabled else '<span class="tag off">выключен</span>'
     mode_label = "слияние" if mode != "mirror" else "зеркало"
@@ -124,20 +129,21 @@ def render_route_card(route, sub_base):
 <div class="card">
   <div class="route-head"><div>
     <div class="route-title">{title or '(без названия)'} {state} <span class="tag">{esc(mode_label)}</span></div>
-    <div class="path">{path}</div></div></div>
-  <div class="muted" style="margin-top:6px">Публичная ссылка: <span class="path">{full_url}</span></div>
+    <div class="path blur">{path}</div></div></div>
+  <div class="muted" style="margin-top:6px">Публичная ссылка: <span class="path blur">{full_url}</span></div>
   <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Редактировать ({len(upstreams)} upstream)</summary>
   <form method="post" action="/routes/{rid}/update">
     <label>Название</label><input name="title" value="{title}">
-    <label>Путь подписки</label><input name="path" value="{path}">
+    <label>Путь подписки</label><input name="path" value="{path}" class="blur">
     <label>Режим</label>
     <select name="mode">
       <option value="merge"{' selected' if mode != 'mirror' else ''}>Слияние</option>
       <option value="mirror"{' selected' if mode == 'mirror' else ''}>Зеркало</option>
     </select>
-    <label>Upstream-ссылки (по одной в строке)</label><textarea name="upstreams">{ups_text}</textarea>
+    <label>Upstream-ссылки (по одной в строке)</label><textarea name="upstreams" class="blur">{ups_text}</textarea>
+    <label>Свой sub-текст (свои ссылки, добавятся к маршруту)</label><textarea name="custom_text" class="blur" placeholder="vless://...">{custom_text}</textarea>
     <label class="row" style="margin-top:10px"><input type="checkbox" name="enabled" value="1" style="width:auto"{' checked' if enabled else ''}> <span>Включён</span></label>
-    <div class="row" style="margin-top:12px"><button class="btn small" type="submit">Сохранить</button></div>
+    <div class="row" style="margin-top:12px"><button class="btn small primary" type="submit">Сохранить</button></div>
   </form>
   <form class="inline" method="post" action="/routes/{rid}/delete" onsubmit="return confirm('Удалить этот маршрут?')">
     <div style="margin-top:8px"><button class="btn small red" type="submit">Удалить</button></div>
@@ -155,7 +161,8 @@ def render_classic(routes, sub_base, flash="", flash_err=False):
 <title>Список — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
 <body><div class="wrap">
 <div class="route-head"><div><h1>Маршруты (список)</h1>
-<div class="sub">Слияние подписок, переименование, свои пути</div></div></div>
+<div class="sub">Слияние подписок, переименование, свои пути</div></div>
+<button class="btn small gray" onclick="document.body.classList.toggle('unblur')">Показать/скрыть ссылки</button></div>
 <div style="margin-bottom:16px">{nav_links("/classic")}</div>
 {flash_html}{cards}<hr>
 <div class="card"><div class="route-title">Новый маршрут</div>
@@ -164,7 +171,8 @@ def render_classic(routes, sub_base, flash="", flash_err=False):
   <label>Путь подписки</label><input name="path" placeholder="/custom/custom" required>
   <label>Режим</label><select name="mode"><option value="merge">Слияние</option><option value="mirror">Зеркало</option></select>
   <label>Upstream-ссылки (по одной в строке)</label><textarea name="upstreams"></textarea>
-  <div style="margin-top:12px"><button class="btn" type="submit">Создать</button></div>
+  <label>Свой sub-текст (свои ссылки)</label><textarea name="custom_text" placeholder="vless://..."></textarea>
+  <div style="margin-top:12px"><button class="btn primary" type="submit">Создать</button></div>
 </form></div>
 </div></body></html>"""
 
@@ -311,6 +319,53 @@ def render_settings(settings, sub_base, flash="", flash_err=False, crypto_ok=Tru
     <div><label>Кулдаун переключений, сек</label><input name="cooldown" type="number" value="{esc(settings.get('cooldown',60))}"></div>
   </div>
 </fieldset>
-<button class="btn" type="submit">Сохранить настройки</button>
+<button class="btn primary" type="submit">Сохранить настройки</button>
 </form>
+</div></body></html>"""
+
+
+# ── статистика ─────────────────────────────────────────────────────────────
+def render_stats(stats, routes, node_id, sub_base):
+    title_by_id = {r.get("id"): (r.get("title") or r.get("path") or r.get("id")) for r in routes}
+    path_by_id = {r.get("id"): r.get("path", "") for r in routes}
+    blocks = []
+    # маршруты с трафиком — по числу запросов
+    items = sorted(stats.items(), key=lambda kv: kv[1].get("requests", 0), reverse=True)
+    for rid, st in items:
+        name = esc(title_by_id.get(rid, rid))
+        path = esc(path_by_id.get(rid, ""))
+        rows = []
+        for d in st.get("devices", []):
+            label = esc(d.get("hwid") or d.get("device") or "—")
+            rows.append(
+                f'<tr><td><span class="mono">{label[:20]}</span></td>'
+                f'<td>{esc(d.get("model") or "—")}</td><td>{esc(d.get("app") or "—")}</td>'
+                f'<td class="mono">{esc(d.get("ip") or "—")}</td><td>{esc(d.get("cnt"))}</td>'
+                f'<td class="muted">{esc(_ago(d.get("last_ts")))}</td></tr>')
+        blocks.append(
+            f'<div class="card"><div class="route-head"><div>'
+            f'<div class="route-title">{name or "(без названия)"}</div>'
+            f'<div class="path blur">{path}</div></div>'
+            f'<div style="text-align:right"><div class="route-title">{esc(st.get("requests",0))}</div>'
+            f'<div class="muted">запросов · устройств: {len(st.get("devices",[]))}</div></div></div>'
+            f'<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Устройства</summary>'
+            f'<table class="tbl" style="margin-top:8px"><thead><tr><th>HWID</th><th>Модель</th><th>Клиент</th><th>IP</th><th>Запр.</th><th>Активность</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></details>'
+            f'<form class="inline" method="post" action="/stats/reset" style="margin-top:8px">'
+            f'<input type="hidden" name="route" value="{esc(rid)}">'
+            f'<button class="btn small ghost" type="submit">Сбросить по маршруту</button></form></div>')
+    body = "".join(blocks) or '<div class="card muted">Пока нет обращений к маршрутам на этом узле.</div>'
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Статистика — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
+<body><div class="wrap">
+<h1>Статистика</h1>
+<div style="margin:8px 0 16px">{nav_links("/stats")}</div>
+<div class="muted" style="margin-bottom:12px">Считается локально на этом узле (<b>{esc(node_id)}</b>) —
+обращения клиентов к подпискам. Поскольку домен подписок указывает на активный узел,
+основная статистика накапливается там, где сейчас активный.
+<button class="btn small gray" onclick="document.body.classList.toggle('unblur')">Показать/скрыть пути</button></div>
+{body}
+<form class="inline" method="post" action="/stats/reset" style="margin-top:8px">
+  <button class="btn small ghost" type="submit" onclick="return confirm('Сбросить всю статистику узла?')">Сбросить всё</button></form>
 </div></body></html>"""

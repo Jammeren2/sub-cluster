@@ -211,8 +211,7 @@ def _profile_title_header(title):
     return "base64:" + encoded
 
 
-def build_mirror_response(route):
-    url = route["upstreams"][0]
+def build_mirror_response(route, url):
     body, headers = fetch_upstream_cached(url)
     headers = dict(headers)
     if route.get("title"):
@@ -220,11 +219,11 @@ def build_mirror_response(route):
     return body, headers
 
 
-def build_merged_response(route):
+def build_merged_response(route, urls, custom_text=""):
     all_links = []
     seen = set()
     infos = []
-    for url in route.get("upstreams", []):
+    for url in urls:
         try:
             body, headers = fetch_upstream_cached(url)
         except Exception as e:
@@ -237,6 +236,12 @@ def build_merged_response(route):
         ui = headers.get("Subscription-Userinfo")
         if ui:
             infos.append(_parse_userinfo(ui))
+    # свой sub-текст маршрута (и транзитивно — из подключённых маршрутов)
+    if custom_text and custom_text.strip():
+        for link in extract_links(custom_text.encode("utf-8")):
+            if link not in seen:
+                seen.add(link)
+                all_links.append(link)
     payload = base64.b64encode(("\n".join(all_links)).encode("utf-8")).decode("ascii")
     out_headers = {
         "Content-Type": "text/plain; charset=utf-8",
@@ -249,8 +254,12 @@ def build_merged_response(route):
     return payload.encode("ascii"), out_headers
 
 
-def build_route_response(route):
+def build_route_response(route, urls=None, custom_text=""):
+    """urls/custom_text — разрешённый (транзитивный) набор. Если urls=None,
+    берём route['upstreams'] (обратная совместимость)."""
+    if urls is None:
+        urls = route.get("upstreams", [])
     mode = route.get("mode", "merge")
-    if mode == "mirror" and len(route.get("upstreams", [])) == 1:
-        return build_mirror_response(route)
-    return build_merged_response(route)
+    if mode == "mirror" and len(urls) == 1 and not (custom_text or "").strip():
+        return build_mirror_response(route, urls[0])
+    return build_merged_response(route, urls, custom_text)

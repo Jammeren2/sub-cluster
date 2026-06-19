@@ -19,8 +19,15 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 RESERVED_PATHS = {"/healthz"}
 
 
+CUSTOM_TEXT_MAX = 20000
+
+
 def _new_id():
     return secrets.token_hex(8)
+
+
+def _norm_custom_text(v):
+    return str(v or "")[:CUSTOM_TEXT_MAX]
 
 
 def _num(v, default=0.0):
@@ -72,6 +79,10 @@ def sync_graph_from_routes(cfg):
     for s in cfg.get("sources", []):
         if s.get("url"):
             old_by_url.setdefault(s["url"], s)
+    route_ids = {r.get("id") for r in cfg["routes"] if r.get("id")}
+    # сохраняем рёбра маршрут→маршрут (классические формы их не описывают)
+    kept_route_edges = [e for e in cfg.get("edges", [])
+                        if e.get("from") in route_ids and e.get("to") in route_ids]
     sources, edges, by_url = [], [], {}
     for route in cfg["routes"]:
         rid = route.get("id")
@@ -92,7 +103,7 @@ def sync_graph_from_routes(cfg):
                 by_url[url] = node
             edges.append({"from": node["id"], "to": rid})
     cfg["sources"] = sources
-    cfg["edges"] = edges
+    cfg["edges"] = edges + kept_route_edges
     autolayout(cfg)
 
 
@@ -112,6 +123,55 @@ def recompute_upstreams_from_graph(cfg):
             if url and url not in ups:
                 ups.append(url)
         route["upstreams"] = ups
+
+
+def _creates_cycle(radj, fr, to):
+    """Ребро fr→to (to зависит от fr). Цикл, если fr уже (транзитивно) зависит от to."""
+    stack, seen = [fr], set()
+    while stack:
+        n = stack.pop()
+        if n == to:
+            return True
+        if n in seen:
+            continue
+        seen.add(n)
+        stack.extend(radj.get(n, []))
+    return False
+
+
+def resolve_links_spec(store, route):
+    """Полный набор для отдачи маршрута: (urls, custom_text) — источники и свой-текст
+    транзитивно через маршруты, подключённые на вход. Циклобезопасно."""
+    cfg = store.get_config() or {}
+    routes_by_id = {r.get("id"): r for r in cfg.get("routes", []) if r.get("id")}
+    src_by_id = {s.get("id"): s for s in cfg.get("sources", []) if s.get("id")}
+    incoming = {}
+    for e in cfg.get("edges", []):
+        incoming.setdefault(e.get("to"), []).append(e.get("from"))
+    urls, seen, texts, visited = [], set(), [], set()
+    # Итеративный DFS (а не рекурсия) — глубина цепочки не упирается в лимит стека.
+    stack = [route.get("id")]
+    while stack:
+        rid = stack.pop()
+        if rid in visited:
+            continue
+        visited.add(rid)
+        r = routes_by_id.get(rid)
+        if not r or not r.get("enabled", True):
+            # выключенный маршрут не отдаёт свой контент даже как вход другого
+            continue
+        ct = (r.get("custom_text") or "").strip()
+        if ct:
+            texts.append(ct)
+        for fid in incoming.get(rid, []):
+            if fid in src_by_id:
+                u = (src_by_id[fid].get("url") or "").strip()
+                if u and u not in seen:
+                    seen.add(u)
+                    urls.append(u)
+            elif fid in routes_by_id:
+                stack.append(fid)
+    return urls, "\n".join(texts)
 
 
 # ── чтение ────────────────────────────────────────────────────────────────
@@ -139,12 +199,13 @@ def find_route(store, path):
 
 
 # ── запись через Store ────────────────────────────────────────────────────
-def add_route(store, path, title, upstreams, mode):
+def add_route(store, path, title, upstreams, mode, custom_text=""):
     def mut(cfg):
         _ensure_keys(cfg)
         cfg["routes"].append({
             "id": _new_id(), "path": normalize_path(path), "title": title,
             "upstreams": upstreams, "mode": mode, "enabled": True,
+            "custom_text": _norm_custom_text(custom_text),
         })
         sync_graph_from_routes(cfg)
     store.update_config(mut)
@@ -162,6 +223,8 @@ def update_route(store, route_id, **fields):
                 for k in ("title", "mode", "upstreams"):
                     if k in fields:
                         r[k] = fields[k]
+                if "custom_text" in fields:
+                    r["custom_text"] = _norm_custom_text(fields["custom_text"])
                 if "enabled" in fields:
                     r["enabled"] = bool(fields["enabled"])
                 found[0] = True
@@ -265,20 +328,30 @@ def save_graph(store, data):
         routes.append({
             "id": rid, "path": path, "title": title, "mode": mode,
             "enabled": enabled, "upstreams": [],
+            "custom_text": _norm_custom_text(r.get("custom_text")),
             "x": _num(r.get("x"), 520.0), "y": _num(r.get("y"), 80.0),
         })
 
     if errors:
         return False, errors
 
+    # Рёбра: from = источник ИЛИ маршрут (маршрут можно подключить в другой
+    # маршрут); to = всегда маршрут. Запрещаем самопетли и циклы.
     edges, seen_edge = [], set()
+    radj = {}  # route -> [route inputs] для проверки циклов
     for e in raw_edges:
         if not isinstance(e, dict):
             continue
         fr = id_map.get(str(e.get("from") or ""), str(e.get("from") or ""))
         to = id_map.get(str(e.get("to") or ""), str(e.get("to") or ""))
         key = (fr, to)
-        if fr in src_ids and to in route_ids and key not in seen_edge:
+        if to not in route_ids or fr == to or key in seen_edge:
+            continue
+        if fr in src_ids:
+            seen_edge.add(key)
+            edges.append({"from": fr, "to": to})
+        elif fr in route_ids and not _creates_cycle(radj, fr, to):
+            radj.setdefault(to, []).append(fr)
             seen_edge.add(key)
             edges.append({"from": fr, "to": to})
 

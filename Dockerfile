@@ -5,7 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
-COPY *.py ./
+COPY *.py editor.js editor.css ./
 
 # Три порта: ADMIN (панель), SUB (подписки), CLUSTER (peer-API кластера).
 # БД кластера — в /data (volume), переживает пересоздание контейнера.

@@ -297,6 +297,9 @@ class AdminHandler(_Base):
             self._html(200, webui.render_classic(graph.get_routes(STORE), sub_public_base()))
         elif path == "/cluster":
             self._html(200, webui.render_cluster(CLUSTER.status(), sub_public_base()))
+        elif path == "/stats":
+            self._html(200, webui.render_stats(STORE.get_stats(), graph.get_routes(STORE),
+                                               CLUSTER.id, sub_public_base()))
         elif path == "/settings":
             s = STORE.get_settings()
             has_pw = bool((s.get("dns") or {}).get("regru_password_enc"))
@@ -362,7 +365,8 @@ class AdminHandler(_Base):
                 return
             graph.add_route(STORE, p, form.get("title", [""])[0].strip(),
                             graph.parse_upstreams(form.get("upstreams", [""])[0]),
-                            form.get("mode", ["merge"])[0].strip())
+                            form.get("mode", ["merge"])[0].strip(),
+                            custom_text=form.get("custom_text", [""])[0])
             self._redirect("/classic")
             return
 
@@ -382,6 +386,7 @@ class AdminHandler(_Base):
             graph.update_route(STORE, rid, path=p, title=form.get("title", [""])[0].strip(),
                                mode=form.get("mode", ["merge"])[0].strip(),
                                upstreams=graph.parse_upstreams(form.get("upstreams", [""])[0]),
+                               custom_text=form.get("custom_text", [""])[0],
                                enabled=("enabled" in form))
             self._redirect("/classic")
             return
@@ -431,6 +436,12 @@ class AdminHandler(_Base):
             self._redirect("/cluster")
             return
 
+        # ── статистика ──
+        if path == "/stats/reset":
+            STORE.reset_stats(self._read_form().get("route", [""])[0].strip() or None)
+            self._redirect("/stats")
+            return
+
         # ── настройки ──
         if path == "/settings/save":
             self._save_settings(self._read_form())
@@ -471,13 +482,16 @@ class AdminHandler(_Base):
 
 # ── sub-сервер (отдача подписок) ───────────────────────────────────────────
 class SubHandler(_Base):
-    def _log_device(self):
+    def _device(self):
         ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
               or self.headers.get("X-Real-IP") or self.client_address[0])
-        print(f"[{self.log_date_time_string()}] DEVICE ip={ip} "
-              f"hwid={self.headers.get('X-Hwid','-')} model={self.headers.get('X-Device-Model','-')} "
-              f"app={self.headers.get('X-App-Version','-')} ua=\"{self.headers.get('User-Agent','-')}\"",
-              flush=True)
+        return {
+            "ip": ip,
+            "hwid": self.headers.get("X-Hwid", ""),
+            "model": self.headers.get("X-Device-Model", ""),
+            "app": self.headers.get("X-App-Version", ""),
+            "ua": self.headers.get("User-Agent", "-"),
+        }
 
     def do_GET(self):
         raw_path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -486,14 +500,21 @@ class SubHandler(_Base):
             return
         route = graph.find_route(STORE, raw_path)
         if route:
-            self._log_device()
+            d = self._device()
+            print(f"[{self.log_date_time_string()}] DEVICE ip={d['ip']} hwid={d['hwid'] or '-'} "
+                  f"model={d['model'] or '-'} app={d['app'] or '-'} ua=\"{d['ua']}\"", flush=True)
+            urls, custom_text = graph.resolve_links_spec(STORE, route)
             try:
-                body, headers = subs.build_route_response(route)
+                body, headers = subs.build_route_response(route, urls, custom_text)
             except urllib.error.HTTPError as e:
                 self._respond(502, f"upstream HTTP {e.code}".encode())
             except Exception as e:
                 self._respond(502, f"upstream error: {e}".encode())
             else:
+                try:
+                    STORE.record_device(route["id"], d["hwid"], d["model"], d["app"], d["ip"])
+                except Exception:
+                    pass
                 self._respond(200, body, headers)
             return
         self._respond(404, b"not found")

@@ -81,6 +81,14 @@ class Store:
             " key TEXT PRIMARY KEY, data TEXT NOT NULL,"
             " version INTEGER NOT NULL, updated_at REAL NOT NULL, origin TEXT NOT NULL)"
         )
+        # Статистика по устройствам на маршрутах — ЛОКАЛЬНАЯ (не синкается между
+        # узлами): каждый узел считает запросы, что пришли к нему.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS device_seen ("
+            " route_id TEXT NOT NULL, device TEXT NOT NULL, hwid TEXT, model TEXT,"
+            " app TEXT, ip TEXT, cnt INTEGER NOT NULL DEFAULT 0,"
+            " first_ts REAL, last_ts REAL, PRIMARY KEY(route_id, device))"
+        )
         self._conn.commit()
         self._ensure("config", DEFAULT_CONFIG)
         self._ensure("failover", DEFAULT_FAILOVER)
@@ -310,6 +318,58 @@ class Store:
     def members_doc(self):
         """Полный документ участников (для отдачи пирам)."""
         return self.get("members") or {"nodes": {}}
+
+    # ── статистика устройств/маршрутов (локальная) ────────────────────────
+    def record_device(self, route_id, hwid, model, app, ip, max_per_route=2000):
+        """Засчитать обращение устройства к маршруту. Поля приходят из заголовков
+        неаутентифицированного клиента — ограничиваем длину и число строк (LRU),
+        чтобы X-Hwid со случайными значениями не раздул БД (disk-fill DoS)."""
+        hwid = (hwid or "")[:128]
+        model = (model or "")[:64]
+        app = (app or "")[:64]
+        ip = (ip or "")[:64]
+        device = (hwid.strip() or ("ip:" + (ip or "?")))[:128]
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO device_seen(route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts)"
+                " VALUES(?,?,?,?,?,?,1,?,?)"
+                " ON CONFLICT(route_id,device) DO UPDATE SET cnt=cnt+1, last_ts=?,"
+                " model=excluded.model, app=excluded.app, ip=excluded.ip",
+                (route_id, device, hwid, model, app, ip, now, now, now),
+            )
+            # держим не более N последних устройств на маршрут
+            self._conn.execute(
+                "DELETE FROM device_seen WHERE route_id=? AND device NOT IN ("
+                " SELECT device FROM device_seen WHERE route_id=? ORDER BY last_ts DESC LIMIT ?)",
+                (route_id, route_id, max_per_route),
+            )
+            self._conn.commit()
+
+    def get_stats(self):
+        """→ {route_id: {requests, devices:[{device,hwid,model,app,ip,cnt,last_ts,first_ts}]}}"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts FROM device_seen"
+                " ORDER BY last_ts DESC LIMIT 5000"
+            ).fetchall()
+        out = {}
+        for r in rows:
+            rid = r[0]
+            d = {"device": r[1], "hwid": r[2], "model": r[3], "app": r[4],
+                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8]}
+            e = out.setdefault(rid, {"requests": 0, "devices": []})
+            e["requests"] += r[6]
+            e["devices"].append(d)
+        return out
+
+    def reset_stats(self, route_id=None):
+        with self._lock:
+            if route_id:
+                self._conn.execute("DELETE FROM device_seen WHERE route_id=?", (route_id,))
+            else:
+                self._conn.execute("DELETE FROM device_seen")
+            self._conn.commit()
 
     def close(self):
         with self._lock:
