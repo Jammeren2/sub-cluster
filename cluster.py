@@ -19,6 +19,7 @@ import json
 import hmac
 import socket
 import hashlib
+import ssl
 import secrets
 import threading
 import urllib.request
@@ -26,6 +27,25 @@ import urllib.error
 
 import secretbox
 import dns_providers
+
+
+def _build_ssl_context():
+    """CA-контекст для https-запросов к пирам (admin-домены, серты Let's Encrypt).
+    На slim-образах системного CA-бандла может не быть — берём certifi."""
+    if os.environ.get("INSECURE_TLS", "").lower() in ("1", "true", "yes"):
+        return ssl._create_unverified_context()
+    ctx = ssl.create_default_context()
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    return ctx
+
+
+_SSL_CTX = _build_ssl_context()
 
 # ── идентичность узла из окружения ─────────────────────────────────────────
 NODE_ID = os.environ.get("NODE_ID") or socket.gethostname() or "node"
@@ -180,7 +200,8 @@ class Cluster:
             req.add_header(k, v)
         if method != "GET":
             req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=self.http_timeout) as resp:
+        ctx = _SSL_CTX if url.lower().startswith("https") else None
+        with urllib.request.urlopen(req, timeout=self.http_timeout, context=ctx) as resp:
             raw = resp.read().decode("utf-8", errors="ignore")
         return json.loads(raw) if raw else {}
 
