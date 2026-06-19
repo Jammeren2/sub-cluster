@@ -1,18 +1,24 @@
-# Развёртывание одного узла кластера (для серверов БЕЗ Coolify).
-# На узле с Coolify деплой через его UI — см. README (тот же образ и env).
+# Деплой через COOLIFY (узел с Coolify).
+# Только приложение — HTTPS и маршрутизацию доменов делает встроенный прокси
+# Coolify (Traefik). Свой Caddy здесь НЕ нужен (он бы конфликтовал за 80/443).
 #
-# Параметры узла — в файле .env рядом (скопируй .env.example → .env и заполни).
-# Caddy терминирует HTTPS для обоих доменов и проксирует на приложение.
-# Сертификаты выдаются on-demand: пока домен не указывает на этот узел, серт не
-# нужен; как только DNS переключится сюда — Caddy выпустит серт при первом запросе.
+# В Coolify после деплоя задай домены сервиса app:
+#   admin.example.net  → порт 8080
+#   happ.example.com       → порт 8081
+# (в Coolify: Service app → Domains, либо переменные SERVICE_FQDN_APP_8080 /
+#  SERVICE_FQDN_APP_8081). Порт 8083 публикуется на хост напрямую — он нужен
+# другим узлам кластера (peer-API) и НЕ должен идти через прокси.
+#
+# Переменные узла (NODE_ID, NODE_PUBLIC_IP, CLUSTER_SECRET, SECRET_KEY,
+# ADMIN_PASSWORD, PEERS, …) задаются в Coolify (Environment Variables).
+#
+# Для серверов БЕЗ Coolify используй docker-compose.standalone.yml (там есть Caddy).
 
 services:
   app:
     build: .
     image: sub-cluster
-    container_name: sub-cluster-app
     restart: unless-stopped
-    env_file: .env
     environment:
       LISTEN_HOST: "0.0.0.0"
       ADMIN_PORT: "8080"
@@ -20,30 +26,34 @@ services:
       CLUSTER_PORT: "8083"
       DB_FILE: "/data/cluster.db"
       PYTHONUNBUFFERED: "1"
+      # Идентичность узла и секреты — задай в Coolify (Environment Variables):
+      #   NODE_ID, NODE_LABEL, NODE_PUBLIC_IP, NODE_PRIORITY, PEERS,
+      #   CLUSTER_SECRET, SECRET_KEY, ADMIN_USER, ADMIN_PASSWORD
+      NODE_ID: "${NODE_ID:-node1}"
+      NODE_LABEL: "${NODE_LABEL:-}"
+      NODE_PUBLIC_IP: "${NODE_PUBLIC_IP:-}"
+      NODE_PRIORITY: "${NODE_PRIORITY:-1}"
+      PEERS: "${PEERS:-}"
+      CLUSTER_SECRET: "${CLUSTER_SECRET:-}"
+      SECRET_KEY: "${SECRET_KEY:-}"
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      CACHE_TTL: "${CACHE_TTL:-60}"
     volumes:
       - cluster-data:/data
-    ports:
-      # peer-API кластера — ДОЛЖЕН быть доступен другим узлам по публичному IP.
-      - "8083:8083"
+    # Домены admin/sub проксирует Coolify по внутренней сети (порты 8080/8081).
     expose:
       - "8080"
       - "8081"
-
-  caddy:
-    image: caddy:2
-    container_name: sub-cluster-caddy
-    restart: unless-stopped
-    depends_on:
-      - app
+    # peer-API кластера — публикуем на хост, доступен другим узлам по IP.
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=3).read()==b'ok' else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 volumes:
   cluster-data:
-  caddy-data:
-  caddy-config:

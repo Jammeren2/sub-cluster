@@ -1,0 +1,49 @@
+# Деплой на узле БЕЗ Coolify: приложение + Caddy (HTTPS для обоих доменов).
+# Запускать из каталога репозитория, чтобы бинд ./Caddyfile нашёл файл:
+#   cp .env.example .env   # заполнить
+#   docker compose -f docker-compose.standalone.yml up -d --build
+#
+# Caddy on-demand TLS: сертификат выпускается при первом запросе, когда домен уже
+# указывает на этот узел (после фейловера DNS переключится сюда автоматически).
+
+services:
+  app:
+    build: .
+    image: sub-cluster
+    container_name: sub-cluster-app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LISTEN_HOST: "0.0.0.0"
+      ADMIN_PORT: "8080"
+      SUB_PORT: "8081"
+      CLUSTER_PORT: "8083"
+      DB_FILE: "/data/cluster.db"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - cluster-data:/data
+    ports:
+      # peer-API кластера — доступен другим узлам по публичному IP.
+      - "8083:8083"
+    expose:
+      - "8080"
+      - "8081"
+
+  caddy:
+    image: caddy:2
+    container_name: sub-cluster-caddy
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  cluster-data:
+  caddy-data:
+  caddy-config:

@@ -66,26 +66,39 @@ reg.ru-логин/пароль и домены задаются в панели 
 
 ## Деплой
 
+Два compose-файла: `docker-compose.yml` — для Coolify (только приложение,
+HTTPS делает прокси Coolify), `docker-compose.standalone.yml` — для серверов
+без Coolify (приложение + Caddy).
+
+### Узел с Coolify
+
+Coolify сам поднимает прокси (Traefik) на 80/443, поэтому свой Caddy там не
+нужен — деплоится только сервис `app` из `docker-compose.yml`.
+
+1. Создай ресурс **Docker Compose** из этого репозитория (файл по умолчанию
+   `docker-compose.yml`).
+2. В **Environment Variables** задай: `NODE_ID`, `NODE_LABEL`, `NODE_PUBLIC_IP`,
+   `NODE_PRIORITY`, `PEERS` (адреса других узлов `ip:8083`), `CLUSTER_SECRET`,
+   `SECRET_KEY`, `ADMIN_USER`, `ADMIN_PASSWORD` (см. `.env.example`).
+3. Назначь домены сервису `app`:
+   `admin.example.net` → порт **8080**, `happ.example.com` → порт **8081**
+   (в Coolify: Domains у сервиса, или переменные `SERVICE_FQDN_APP_8080` /
+   `SERVICE_FQDN_APP_8081`). HTTPS Coolify выпустит, когда домен укажет на узел.
+4. Порт **8083** уже публикуется на хост (peer-API) — убедись, что он открыт
+   снаружи для других узлов.
+
 ### Узлы без Coolify (docker compose + Caddy)
 
 ```bash
 git clone <репозиторий> sub-cluster && cd sub-cluster
 cp .env.example .env      # заполни NODE_ID/NODE_PUBLIC_IP/PEERS/секреты
-docker compose up -d --build
-docker compose logs -f
+docker compose -f docker-compose.standalone.yml up -d --build
+docker compose -f docker-compose.standalone.yml logs -f
 ```
 
 Caddy сам терминирует HTTPS для обоих доменов (on-demand TLS: сертификат
 выпускается при первом запросе, когда DNS уже указывает на этот узел).
 Порт **8083 публикуется на хост** — он должен быть доступен другим узлам.
-
-### Узел с Coolify
-
-Деплой того же образа через Coolify; в сервисе задай те же переменные
-окружения (`.env`), пробрось volume на `/data`, и:
-- маршрут Traefik: `admin.example.net` → контейнер :8080, `happ.example.com` → :8081;
-- **открой порт 8083** наружу (peer-API), чтобы другие узлы видели этот узел;
-- HTTPS Traefik/Coolify выпустит, когда домен будет указывать на этот узел.
 
 ---
 
