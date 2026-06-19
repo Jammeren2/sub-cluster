@@ -2,8 +2,14 @@
 .gitignore
 __pycache__/
 *.pyc
-README.md
+README*.md
 docker-compose*.yml
+Caddyfile
+.env
+.env.example
 config.json
 config.json.tmp
+*.db
+*.db-wal
+*.db-shm
 data/

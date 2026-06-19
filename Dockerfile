@@ -1,23 +1,24 @@
 FROM python:3.12-slim
 
-# certifi — надёжный CA-бандл для TLS (приложение само его подхватит, если есть).
+# certifi — CA-бандл для TLS; cryptography — шифрование секретов «в покое».
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
-COPY sub_server.py .
+COPY *.py ./
 
-# Внутри контейнера всегда слушаем 0.0.0.0:8080 (наружу маппится через compose).
-# PYTHONUNBUFFERED=1 — чтобы логи сразу попадали в `docker logs`, без буферизации.
-# CONFIG_FILE — конфиг маршрутов в /data (пробрось как volume, чтобы не терялся).
+# Три порта: ADMIN (панель), SUB (подписки), CLUSTER (peer-API кластера).
+# БД кластера — в /data (volume), переживает пересоздание контейнера.
 ENV LISTEN_HOST=0.0.0.0 \
-    LISTEN_PORT=8080 \
-    CONFIG_FILE=/data/config.json \
+    ADMIN_PORT=8080 \
+    SUB_PORT=8081 \
+    CLUSTER_PORT=8083 \
+    DB_FILE=/data/cluster.db \
     PYTHONUNBUFFERED=1
 
-EXPOSE 8080
+EXPOSE 8080 8081 8083
 
-# Не работаем под root. /data — для персистентного конфига маршрутов.
+# Не работаем под root. /data — для персистентной БД кластера.
 RUN useradd --create-home --uid 10001 app \
     && mkdir -p /data && chown app:app /data
 VOLUME ["/data"]
