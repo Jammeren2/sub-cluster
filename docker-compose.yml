@@ -23,7 +23,7 @@ services:
       LISTEN_HOST: "0.0.0.0"
       ADMIN_PORT: "8080"
       SUB_PORT: "8081"
-      CLUSTER_PORT: "8083"
+      CLUSTER_PORT: "${NODE_ID:1753}"
       DB_FILE: "/data/cluster.db"
       PYTHONUNBUFFERED: "1"
       # Идентичность узла и секреты — задай в Coolify (Environment Variables):
