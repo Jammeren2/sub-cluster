@@ -152,12 +152,29 @@ def load_config():
 
 
 def save_config():
-    """Атомарно пишет конфиг на диск (вызывать под _config_lock)."""
-    os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
-    tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(_config, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, CONFIG_FILE)
+    """
+    Атомарно пишет конфиг на диск (вызывать под _config_lock).
+    Если каталог недоступен для записи (напр. volume смонтирован root'ом, а
+    процесс работает под непривилегированным пользователем) — НЕ роняем сервер:
+    маршруты продолжают работать в памяти, а в лог пишем понятную подсказку.
+    """
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_config, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_FILE)
+        return True
+    except OSError as e:
+        print(
+            f"[!] Не удалось сохранить конфиг в {CONFIG_FILE}: {e}\n"
+            f"    Изменения действуют только до перезапуска. Проверь права на каталог "
+            f"{os.path.dirname(CONFIG_FILE) or '.'} (он должен быть доступен на запись "
+            f"пользователю контейнера uid=10001). Проще всего использовать именованный "
+            f"docker-volume вместо bind-mount.",
+            flush=True,
+        )
+        return False
 
 
 def seed_legacy_route():
