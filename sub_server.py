@@ -149,6 +149,7 @@ def load_config():
     except Exception as e:
         print(f"[!] Не удалось прочитать конфиг {CONFIG_FILE}: {e}. Старт с пустым.", flush=True)
         _config = {"routes": []}
+    _migrate_loaded()
 
 
 def save_config():
@@ -191,6 +192,7 @@ def seed_legacy_route():
                 "mode": "mirror",
                 "enabled": True,
             })
+            sync_graph_from_routes()
             save_config()
             print(f"[*] Создан легаси-маршрут (зеркало) {LEGACY_SUB_PATH} → {LEGACY_UPSTREAM_URL}", flush=True)
 
@@ -219,6 +221,7 @@ def add_route(path, title, upstreams, mode):
             "mode": mode,
             "enabled": True,
         })
+        sync_graph_from_routes()
         save_config()
 
 
@@ -236,6 +239,7 @@ def update_route(route_id, **fields):
                     r["mode"] = fields["mode"]
                 if "enabled" in fields:
                     r["enabled"] = bool(fields["enabled"])
+                sync_graph_from_routes()
                 save_config()
                 return True
     return False
@@ -247,8 +251,247 @@ def delete_route(route_id):
         _config["routes"] = [r for r in _config["routes"] if r.get("id") != route_id]
         changed = len(_config["routes"]) != before
         if changed:
+            sync_graph_from_routes()
             save_config()
     return changed
+
+
+# ── Граф (нодовый редактор) ───────────────────────────────────────────────
+# Модель графа: sources (узлы-подписки), routes (узлы-выходы), edges (связи).
+# routes[].upstreams остаётся «истиной» для отдачи подписок и пересчитывается
+# из графа при сохранении из редактора; обратно — классические формы правят
+# upstreams, а граф пересобирается под них (с сохранением координат по URL/id).
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _new_id():
+    return secrets.token_hex(8)
+
+
+def _parse_upstreams(text):
+    """Строки textarea → список upstream-ссылок без пустых и дублей (порядок сохранён)."""
+    seen = set()
+    out = []
+    for line in (text or "").splitlines():
+        u = line.strip()
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _ensure_graph_keys():
+    _config.setdefault("routes", [])
+    _config.setdefault("sources", [])
+    _config.setdefault("edges", [])
+
+
+def _autolayout():
+    """Назначает координаты узлам, у которых их ещё нет."""
+    sy = 60
+    for s in _config["sources"]:
+        if not isinstance(s.get("x"), (int, float)):
+            s["x"] = 80
+        if not isinstance(s.get("y"), (int, float)):
+            s["y"] = sy
+            sy += 130
+    ry = 60
+    for r in _config["routes"]:
+        if not isinstance(r.get("x"), (int, float)):
+            r["x"] = 520
+        if not isinstance(r.get("y"), (int, float)):
+            r["y"] = ry
+            ry += 200
+
+
+def sync_graph_from_routes():
+    """Перестраивает sources+edges из routes[].upstreams (вызывать под локом).
+    Координаты/id источников сохраняются по совпадению URL."""
+    _ensure_graph_keys()
+    old_by_url = {}
+    for s in _config.get("sources", []):
+        if s.get("url"):
+            old_by_url.setdefault(s["url"], s)
+    sources = []
+    edges = []
+    by_url = {}
+    for route in _config["routes"]:
+        rid = route.get("id")
+        if not rid:
+            rid = route["id"] = _new_id()
+        for url in route.get("upstreams", []):
+            node = by_url.get(url)
+            if node is None:
+                old = old_by_url.get(url)
+                node = {
+                    "id": (old or {}).get("id") or _new_id(),
+                    "url": url,
+                    "label": (old or {}).get("label", ""),
+                    "x": (old or {}).get("x"),
+                    "y": (old or {}).get("y"),
+                }
+                sources.append(node)
+                by_url[url] = node
+            edges.append({"from": node["id"], "to": rid})
+    _config["sources"] = sources
+    _config["edges"] = edges
+    _autolayout()
+
+
+def recompute_upstreams_from_graph():
+    """routes[].upstreams := url-ы соединённых источников (вызывать под локом)."""
+    _ensure_graph_keys()
+    url_by_id = {s.get("id"): (s.get("url") or "") for s in _config["sources"] if s.get("id")}
+    incoming = {}
+    for e in _config["edges"]:
+        incoming.setdefault(e.get("to"), []).append(e.get("from"))
+    for route in _config["routes"]:
+        rid = route.get("id")
+        if not rid:
+            rid = route["id"] = _new_id()
+        ups = []
+        for sid in incoming.get(rid, []):
+            url = (url_by_id.get(sid) or "").strip()
+            if url and url not in ups:
+                ups.append(url)
+        route["upstreams"] = ups
+
+
+def _migrate_loaded():
+    """После загрузки конфига приводим граф и upstreams к согласованному виду.
+    Любая ошибка миграции (например, повреждённый вручную config.json) не должна
+    ронять сервер — логируем и работаем с тем, что есть."""
+    with _config_lock:
+        try:
+            had_graph = isinstance(_config.get("sources"), list) and isinstance(_config.get("edges"), list)
+            _ensure_graph_keys()
+            if had_graph:
+                recompute_upstreams_from_graph()
+            else:
+                sync_graph_from_routes()
+            _autolayout()
+        except Exception as e:
+            print(f"[!] Ошибка миграции конфига: {e}. Работаем с текущим состоянием.", flush=True)
+
+
+def get_graph():
+    with _config_lock:
+        return {
+            "sources": [dict(s) for s in _config.get("sources", [])],
+            "routes": [dict(r) for r in _config.get("routes", [])],
+            "edges": [dict(e) for e in _config.get("edges", [])],
+        }
+
+
+def _num(v, default=0.0):
+    try:
+        f = float(v)
+        return f if f == f and f not in (float("inf"), float("-inf")) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def save_graph(data):
+    """Принимает граф из редактора, валидирует и сохраняет. → (ok, errors)."""
+    if not isinstance(data, dict):
+        return False, ["Некорректные данные"]
+    raw_sources = data.get("sources")
+    raw_routes = data.get("routes")
+    raw_edges = data.get("edges")
+    if not all(isinstance(x, list) for x in (raw_sources, raw_routes, raw_edges)):
+        return False, ["Некорректная структура графа"]
+    if len(raw_sources) > 500 or len(raw_routes) > 500 or len(raw_edges) > 5000:
+        return False, ["Слишком много узлов/связей"]
+
+    errors = []
+    # Если узлу выдаётся новый id (битый/дублирующийся), запоминаем старый→новый,
+    # чтобы переназначить концы рёбер и не потерять связи.
+    id_map = {}
+
+    sources = []
+    src_ids = set()
+    for s in raw_sources:
+        if not isinstance(s, dict):
+            continue
+        orig = str(s.get("id") or "")
+        sid = orig
+        if not _ID_RE.match(sid):
+            # битый id: оригинала ни у кого нет — рёбра к нему переназначаем.
+            sid = _new_id()
+            if orig:
+                id_map[orig] = sid
+        elif sid in src_ids:
+            # дубль валидного id: оригинал остаётся за первым узлом,
+            # поэтому рёбра к orig должны указывать на него — НЕ переназначаем.
+            sid = _new_id()
+        src_ids.add(sid)
+        sources.append({
+            "id": sid,
+            "url": str(s.get("url") or "").strip()[:2048],
+            "label": str(s.get("label") or "").strip()[:120],
+            "x": _num(s.get("x"), 80.0),
+            "y": _num(s.get("y"), 80.0),
+        })
+
+    routes = []
+    route_ids = set()
+    used_paths = set()
+    for r in raw_routes:
+        if not isinstance(r, dict):
+            continue
+        orig = str(r.get("id") or "")
+        rid = orig
+        if not _ID_RE.match(rid):
+            rid = _new_id()
+            if orig:
+                id_map[orig] = rid
+        elif rid in route_ids:
+            rid = _new_id()
+        route_ids.add(rid)
+        raw_path = str(r.get("path") or "").strip()
+        path = _normalize_path(raw_path)
+        title = str(r.get("title") or "").strip()[:200]
+        mode = "mirror" if str(r.get("mode") or "") == "mirror" else "merge"
+        enabled = bool(r.get("enabled", True))
+        label = title or rid
+        if not raw_path or path == "/":
+            errors.append(f"Маршрут «{label}»: путь не задан")
+        elif path == ADMIN_PATH or path.startswith(ADMIN_PATH + "/") or path == "/healthz":
+            errors.append(f"Путь {path} зарезервирован системой")
+        elif path in used_paths:
+            errors.append(f"Путь {path} используется несколькими маршрутами")
+        else:
+            used_paths.add(path)
+        routes.append({
+            "id": rid, "path": path, "title": title, "mode": mode,
+            "enabled": enabled, "upstreams": [],
+            "x": _num(r.get("x"), 520.0), "y": _num(r.get("y"), 80.0),
+        })
+
+    if errors:
+        return False, errors
+
+    edges = []
+    seen_edge = set()
+    for e in raw_edges:
+        if not isinstance(e, dict):
+            continue
+        fr = str(e.get("from") or "")
+        to = str(e.get("to") or "")
+        fr = id_map.get(fr, fr)
+        to = id_map.get(to, to)
+        key = (fr, to)
+        if fr in src_ids and to in route_ids and key not in seen_edge:
+            seen_edge.add(key)
+            edges.append({"from": fr, "to": to})
+
+    with _config_lock:
+        _config["sources"] = sources
+        _config["routes"] = routes
+        _config["edges"] = edges
+        recompute_upstreams_from_graph()
+        save_config()
+    return True, []
 
 
 # ── Извлечение прокси-ссылок из ответа подписки ──────────────────────────
@@ -603,7 +846,7 @@ def render_route_card(route, public_base):
     </div>
   </form>
   <form class="inline" method="post" action="{esc(ADMIN_PATH)}/routes/{rid}/delete"
-        onsubmit="return confirm('Удалить маршрут {path}?')">
+        onsubmit="return confirm('Удалить этот маршрут?')">
     <div style="margin-top:8px"><button class="btn small red" type="submit">Удалить</button></div>
   </form>
   </details>
@@ -648,6 +891,275 @@ def render_admin(routes, public_base, flash="", flash_err=False):
   </form>
 </div>
 </div></body></html>"""
+
+
+# ── Нодовый редактор (Blender-подобный граф) ──────────────────────────────
+def js_embed(obj):
+    """Безопасно встраивает Python-объект в <script> как JS-литерал."""
+    s = json.dumps(obj, ensure_ascii=False)
+    bs = chr(92)  # обратный слэш, чтобы не путаться с экранированием
+    s = s.replace("<", bs + "u003c").replace(">", bs + "u003e").replace("&", bs + "u0026")
+    # U+2028/U+2029 валидны в JSON, но ломают JS-строку; экранируем их.
+    s = s.replace(chr(0x2028), bs + "u2028").replace(chr(0x2029), bs + "u2029")
+    return s
+
+
+EDITOR_CSS = """
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#1b1b1d;color:#e6e6e6;
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden}
+#top{position:fixed;top:0;left:0;right:0;height:50px;display:flex;align-items:center;gap:8px;
+  padding:0 12px;background:#2b2b2e;border-bottom:1px solid #111;z-index:50}
+#top .title{font-weight:600;font-size:14px;margin-right:6px;white-space:nowrap}
+#top .spacer{flex:1}
+.btn{border:0;border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;background:#3b6fd4;
+  color:#fff;text-decoration:none;display:inline-block;white-space:nowrap}
+.btn.gray{background:#3a3a3e}
+.btn.ghost{background:transparent;border:1px solid #4a4a50;color:#ddd}
+.btn:hover{filter:brightness(1.12)}
+#editor{position:fixed;top:50px;left:0;right:0;bottom:0;overflow:hidden;background:#1b1b1d;
+  background-image:radial-gradient(#303033 1px,transparent 1px);background-size:24px 24px;cursor:grab}
+#editor.panning{cursor:grabbing}
+#world{position:absolute;left:0;top:0;transform-origin:0 0}
+#wires{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:1;overflow:visible}
+#wires path.wire{fill:none;stroke:#9a9aa2;stroke-width:2.5;pointer-events:stroke;cursor:pointer}
+#wires path.wire:hover{stroke:#ff5b5b;stroke-width:3.5}
+#wires path.temp{fill:none;stroke:#f5a623;stroke-width:2.5;stroke-dasharray:6 4;pointer-events:none}
+.node{position:absolute;width:240px;background:#2c2c30;border:1px solid #141416;border-radius:9px;
+  box-shadow:0 8px 22px rgba(0,0,0,.5);z-index:2}
+.node.sel{outline:2px solid #5b9dff;outline-offset:1px}
+.node .hd{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;
+  border-radius:8px 8px 0 0;cursor:grab;font-size:13px;font-weight:600;color:#fff;
+  user-select:none;-webkit-user-select:none}
+.node.src .hd{background:linear-gradient(180deg,#35817a,#2c6f6a)}
+.node.route .hd{background:linear-gradient(180deg,#c47d31,#b06f28)}
+.node .hd .x{cursor:pointer;opacity:.85;font-size:15px;line-height:1;padding:2px 5px;border-radius:4px}
+.node .hd .x:hover{opacity:1;background:rgba(0,0,0,.25)}
+.node .bd{padding:10px 11px 12px}
+.node label{display:block;font-size:11px;color:#9a9aa2;margin:7px 0 3px}
+.node input,.node select{width:100%;background:#202023;border:1px solid #3a3a40;color:#e6e6e6;
+  border-radius:5px;padding:6px 7px;font-size:12px;font-family:inherit}
+.node input:focus,.node select:focus{outline:none;border-color:#5b9dff}
+.node input.mono{font-family:ui-monospace,Consolas,monospace}
+.sock{position:absolute;width:15px;height:15px;border-radius:50%;border:2px solid #141416;top:21px;
+  cursor:crosshair;z-index:3}
+.sock.out{right:-8px;background:#7ee0c8}
+.sock.in{left:-8px;background:#ffce8a}
+.sock:hover{filter:brightness(1.25)}
+.pub{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#7ee787;word-break:break-all;margin-top:9px}
+.pub .copy{cursor:pointer;color:#6ea8fe;margin-left:6px;white-space:nowrap}
+.cnt{font-size:11px;color:#9a9aa2;margin-top:7px}
+.chk{display:flex;align-items:center;gap:6px;margin-top:9px;font-size:12px;color:#cfcfd6;cursor:pointer}
+.chk input{width:auto}
+#hint{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);color:#6a6a72;font-size:14px;
+  text-align:center;pointer-events:none;line-height:1.6}
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#2c2c30;
+  border:1px solid #444;padding:11px 18px;border-radius:9px;z-index:100;display:none;font-size:13px;max-width:80%}
+#toast.err{border-color:#7a2a2a;background:#3a1d1d;color:#ffb0b0}
+#toast.ok{border-color:#2a5a34;background:#16321f;color:#9fe6ad}
+"""
+
+
+EDITOR_JS = r"""
+(function(){
+  const G = window.__GRAPH__ || {sources:[],routes:[],edges:[]};
+  const ADMIN = window.__ADMIN__ || '/admin';
+  const CSRF = window.__CSRF__ || '';
+  const BASE = window.__BASE__ || '';
+  G.sources = G.sources || []; G.routes = G.routes || []; G.edges = G.edges || [];
+
+  const NODE_W = 240, SOCK_Y = 28;
+  const editor = document.getElementById('editor');
+  const world = document.getElementById('world');
+  const svg = document.getElementById('wires');
+  const toast = document.getElementById('toast');
+  const hint = document.getElementById('hint');
+  const nodeEls = {};
+  let view = {panX:60, panY:60, zoom:1};
+  let connecting = null, tempPath = null, hoverIn = null;
+
+  function genId(){ try{ const a=new Uint8Array(8); crypto.getRandomValues(a); return Array.from(a,b=>b.toString(16).padStart(2,'0')).join(''); }catch(e){ let s=''; for(let i=0;i<16;i++) s+=Math.floor(Math.random()*16).toString(16); return s; } }
+  function num(v,d){ v=parseFloat(v); return isFinite(v)?v:d; }
+  function rect(){ return editor.getBoundingClientRect(); }
+  function el(tag,cls,txt){ const e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
+  function normPath(p){ p=(p||'').trim().replace(/^\/+|\/+$/g,''); return p?('/'+p):'/'; }
+
+  // auto-position nodes missing coords
+  let sy=60; G.sources.forEach(s=>{ s.x=num(s.x,80); if(!isFinite(parseFloat(s.y))){ s.y=sy; sy+=130; } else { s.y=num(s.y,sy); } });
+  let ry=60; G.routes.forEach(r=>{ r.x=num(r.x,520); if(!isFinite(parseFloat(r.y))){ r.y=ry; ry+=200; } else { r.y=num(r.y,ry); } });
+
+  function applyTransform(){ world.style.transform='translate('+view.panX+'px,'+view.panY+'px) scale('+view.zoom+')'; }
+  function w2s(p){ return {x:p.x*view.zoom+view.panX, y:p.y*view.zoom+view.panY}; }
+  function sockPos(n,kind){ return kind==='out' ? {x:n.x+NODE_W, y:n.y+SOCK_Y} : {x:n.x, y:n.y+SOCK_Y}; }
+  function isSource(n){ return G.sources.indexOf(n)>=0; }
+  function curve(a,b){ const dx=Math.max(40,Math.abs(b.x-a.x)*0.5); return 'M '+a.x+' '+a.y+' C '+(a.x+dx)+' '+a.y+' '+(b.x-dx)+' '+b.y+' '+b.x+' '+b.y; }
+
+  function redrawWires(){
+    while(svg.firstChild) svg.removeChild(svg.firstChild);
+    G.edges.forEach(e=>{
+      const s=G.sources.find(x=>x.id===e.from), r=G.routes.find(x=>x.id===e.to);
+      if(!s||!r) return;
+      const a=w2s(sockPos(s,'out')), b=w2s(sockPos(r,'in'));
+      const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+      p.setAttribute('d',curve(a,b)); p.setAttribute('class','wire');
+      p.addEventListener('click',ev=>{ ev.stopPropagation(); const i=G.edges.indexOf(e); if(i>=0)G.edges.splice(i,1); redrawWires(); refreshCounts(); });
+      svg.appendChild(p);
+    });
+    if(connecting && tempPath) svg.appendChild(tempPath);
+    hint.style.display=(G.sources.length||G.routes.length)?'none':'block';
+  }
+
+  function refreshCounts(){
+    document.querySelectorAll('.cnt').forEach(c=>{ const rid=c.dataset.rid; c.textContent='источников подключено: '+G.edges.filter(e=>e.to===rid).length; });
+  }
+
+  function dragHeader(handle,node,nEl){
+    handle.addEventListener('mousedown',ev=>{
+      if(ev.target.classList.contains('x')) return;
+      ev.stopPropagation(); ev.preventDefault();
+      let lx=ev.clientX, ly=ev.clientY; nEl.classList.add('sel');
+      function mm(e){ node.x+=(e.clientX-lx)/view.zoom; node.y+=(e.clientY-ly)/view.zoom; lx=e.clientX; ly=e.clientY; nEl.style.left=node.x+'px'; nEl.style.top=node.y+'px'; redrawWires(); }
+      function mu(){ document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); nEl.classList.remove('sel'); }
+      document.addEventListener('mousemove',mm); document.addEventListener('mouseup',mu);
+    });
+  }
+
+  function deleteBtn(x,node){
+    x.addEventListener('mousedown',e=>e.stopPropagation());
+    x.addEventListener('click',e=>{
+      e.stopPropagation();
+      const arr=isSource(node)?G.sources:G.routes; const i=arr.indexOf(node); if(i>=0)arr.splice(i,1);
+      G.edges=G.edges.filter(ed=>ed.from!==node.id && ed.to!==node.id);
+      const dom=nodeEls[node.id]; if(dom)dom.remove(); delete nodeEls[node.id];
+      redrawWires(); refreshCounts();
+    });
+  }
+
+  function startConnect(ev,src){
+    ev.stopPropagation(); ev.preventDefault();
+    connecting={from:src.id};
+    tempPath=document.createElementNS('http://www.w3.org/2000/svg','path'); tempPath.setAttribute('class','temp');
+    function mm(e){ const r=rect(); const a=w2s(sockPos(src,'out')); tempPath.setAttribute('d',curve(a,{x:e.clientX-r.left,y:e.clientY-r.top})); redrawWires(); }
+    function mu(){ document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); finishConnect(hoverIn); }
+    document.addEventListener('mousemove',mm); document.addEventListener('mouseup',mu);
+  }
+  function finishConnect(route){
+    if(connecting && route){
+      const f=connecting.from, t=route.id;
+      if(!G.edges.some(e=>e.from===f && e.to===t)) G.edges.push({from:f,to:t});
+    }
+    connecting=null; tempPath=null; hoverIn=null; redrawWires(); refreshCounts();
+  }
+
+  function makeSource(s){
+    const n=el('div','node src'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
+    const hd=el('div','hd'); hd.appendChild(el('span',null,'Источник')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
+    const bd=el('div','bd');
+    bd.appendChild(el('label',null,'Метка'));
+    const lab=el('input'); lab.value=s.label||''; lab.placeholder='необязательно'; lab.addEventListener('input',()=>s.label=lab.value); bd.appendChild(lab);
+    bd.appendChild(el('label',null,'Ссылка-подписка (upstream)'));
+    const url=el('input','mono'); url.value=s.url||''; url.placeholder='https://сервер/sub/xxxx'; url.addEventListener('input',()=>s.url=url.value); bd.appendChild(url);
+    n.appendChild(bd);
+    const out=el('div','sock out'); out.title='Тяни в маршрут'; n.appendChild(out);
+    dragHeader(hd,s,n); deleteBtn(x,s); out.addEventListener('mousedown',ev=>startConnect(ev,s));
+    nodeEls[s.id]=n; world.appendChild(n);
+  }
+
+  function makeRoute(r){
+    const n=el('div','node route'); n.style.left=r.x+'px'; n.style.top=r.y+'px';
+    const hd=el('div','hd'); hd.appendChild(el('span',null,'Маршрут')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
+    const bd=el('div','bd');
+    bd.appendChild(el('label',null,'Название (видно в клиенте)'));
+    const t=el('input'); t.value=r.title||''; t.placeholder='Моя подписка'; t.addEventListener('input',()=>r.title=t.value); bd.appendChild(t);
+    bd.appendChild(el('label',null,'Путь подписки'));
+    const p=el('input','mono'); p.value=r.path||''; p.placeholder='/custom/custom'; bd.appendChild(p);
+    bd.appendChild(el('label',null,'Режим'));
+    const sel=el('select'); [['merge','Слияние'],['mirror','Зеркало']].forEach(m=>{ const o=el('option',null,m[1]); o.value=m[0]; if((r.mode||'merge')===m[0])o.selected=true; sel.appendChild(o); }); sel.addEventListener('change',()=>r.mode=sel.value); bd.appendChild(sel);
+    const chk=el('label','chk'); const cb=el('input'); cb.type='checkbox'; cb.checked=r.enabled!==false; cb.addEventListener('change',()=>r.enabled=cb.checked); chk.appendChild(cb); chk.appendChild(el('span',null,'Включён')); bd.appendChild(chk);
+    const pub=el('div','pub');
+    function updPub(){ r.path=p.value; pub.innerHTML=''; const span=el('span',null,BASE.replace(/\/$/,'')+normPath(p.value)); pub.appendChild(span); const c=el('span','copy','копировать'); c.addEventListener('click',()=>{ if(navigator.clipboard)navigator.clipboard.writeText(span.textContent); showToast('Ссылка скопирована',false); }); pub.appendChild(c); }
+    p.addEventListener('input',updPub); updPub(); bd.appendChild(pub);
+    const cnt=el('div','cnt'); cnt.dataset.rid=r.id; bd.appendChild(cnt);
+    n.appendChild(bd);
+    const inp=el('div','sock in'); inp.title='Вход'; n.appendChild(inp);
+    dragHeader(hd,r,n); deleteBtn(x,r);
+    inp.addEventListener('mouseenter',()=>hoverIn=r); inp.addEventListener('mouseleave',()=>{ if(hoverIn===r)hoverIn=null; });
+    inp.addEventListener('mouseup',()=>finishConnect(r));
+    nodeEls[r.id]=n; world.appendChild(n);
+  }
+
+  // pan
+  editor.addEventListener('mousedown',e=>{
+    if(e.target!==editor && e.target!==world && e.target!==hint) return;
+    e.preventDefault(); editor.classList.add('panning');
+    let lx=e.clientX, ly=e.clientY;
+    function mm(ev){ view.panX+=ev.clientX-lx; view.panY+=ev.clientY-ly; lx=ev.clientX; ly=ev.clientY; applyTransform(); redrawWires(); }
+    function mu(){ document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); editor.classList.remove('panning'); }
+    document.addEventListener('mousemove',mm); document.addEventListener('mouseup',mu);
+  });
+  // zoom
+  editor.addEventListener('wheel',e=>{
+    e.preventDefault(); const r=rect(); const mx=e.clientX-r.left, my=e.clientY-r.top;
+    const wx=(mx-view.panX)/view.zoom, wy=(my-view.panY)/view.zoom;
+    view.zoom=Math.min(2.5,Math.max(0.2, view.zoom*(e.deltaY<0?1.1:1/1.1)));
+    view.panX=mx-wx*view.zoom; view.panY=my-wy*view.zoom; applyTransform(); redrawWires();
+  },{passive:false});
+
+  function centerWorld(){ const r=rect(); return {x:(r.width/2-view.panX)/view.zoom, y:(r.height/2-view.panY)/view.zoom}; }
+  document.getElementById('addSrc').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeSource(s); redrawWires(); });
+  document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); });
+  document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
+  document.getElementById('save').addEventListener('click',save);
+
+  let toastT=null;
+  function showToast(msg,isErr){ toast.textContent=msg; toast.className=isErr?'err':'ok'; toast.style.display='block'; clearTimeout(toastT); toastT=setTimeout(()=>toast.style.display='none', isErr?6500:2200); }
+
+  function save(){
+    const payload={
+      sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',x:Math.round(s.x),y:Math.round(s.y)})),
+      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,x:Math.round(r.x),y:Math.round(r.y)})),
+      edges:G.edges.map(e=>({from:e.from,to:e.to}))
+    };
+    fetch(ADMIN+'/graph/save',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify(payload)})
+      .then(r=>r.json().then(j=>({ok:r.ok,j})))
+      .then(({ok,j})=>{ if(j&&j.ok){ showToast('Сохранено ✓',false); setTimeout(()=>location.reload(),650); } else { showToast('Не сохранено: '+((j&&j.errors)||['ошибка']).join('; '),true); } })
+      .catch(()=>showToast('Сервер недоступен',true));
+  }
+
+  applyTransform();
+  G.sources.forEach(makeSource); G.routes.forEach(makeRoute);
+  redrawWires(); refreshCounts();
+})();
+"""
+
+
+def render_editor(graph, public_base, csrf):
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Нодовый редактор — Sub Mirror</title><style>{EDITOR_CSS}</style></head>
+<body>
+<div id="top">
+  <span class="title">Маршрутизирование — граф</span>
+  <button class="btn" id="addSrc">+ Источник</button>
+  <button class="btn" id="addRoute">+ Маршрут</button>
+  <button class="btn gray" id="reset">Сбросить вид</button>
+  <span class="spacer"></span>
+  <a class="btn ghost" href="{esc(ADMIN_PATH)}/classic">Классический вид</a>
+  <form method="post" action="{esc(ADMIN_PATH)}/logout" style="display:inline">
+    <button class="btn ghost" type="submit">Выйти</button></form>
+  <button class="btn" id="save">Сохранить</button>
+</div>
+<div id="editor">
+  <svg id="wires" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div id="world"></div>
+  <div id="hint">Пусто. Добавь «<b>+ Источник</b>» (ссылки-подписки) и «<b>+ Маршрут</b>» (твой путь),<br>
+    протяни связь от источника к маршруту и нажми «<b>Сохранить</b>».<br>
+    <span style="opacity:.7">Колесо — зум, перетаскивание фона — панорама.</span></div>
+</div>
+<div id="toast"></div>
+<script>window.__GRAPH__={js_embed(graph)};window.__ADMIN__={js_embed(ADMIN_PATH)};window.__CSRF__={js_embed(csrf)};window.__BASE__={js_embed(public_base)};</script>
+<script>{EDITOR_JS}</script>
+</body></html>"""
 
 
 # ── HTTP-обработчик ───────────────────────────────────────────────────────
@@ -730,6 +1242,19 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8", errors="ignore") if length else ""
         return urllib.parse.parse_qs(raw, keep_blank_values=True)
 
+    def _read_json(self, max_bytes=4_000_000):
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0 or length > max_bytes:
+            return None
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8", errors="ignore"))
+        except Exception:
+            return None
+
+    def _respond_json(self, code, obj):
+        self._respond(code, json.dumps(obj, ensure_ascii=False),
+                      {"Content-Type": "application/json; charset=utf-8"})
+
     # ---- GET ----
     def do_GET(self):
         norm = _normalize_path(self.path.split("?", 1)[0]) if self.path != "/" else "/"
@@ -740,8 +1265,26 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Веб-панель
-        if raw_path == ADMIN_PATH or raw_path == ADMIN_PATH + "/login":
-            if raw_path == ADMIN_PATH and self._current_session():
+        if raw_path == ADMIN_PATH + "/login":
+            if self._current_session():
+                self._redirect(ADMIN_PATH)
+            else:
+                self._respond(200, render_login(),
+                              {"Content-Type": "text/html; charset=utf-8"})
+            return
+
+        if raw_path == ADMIN_PATH:
+            sess = self._current_session()
+            if sess:
+                self._respond(200, render_editor(get_graph(), self._public_base(), sess.get("csrf", "")),
+                              {"Content-Type": "text/html; charset=utf-8"})
+            else:
+                self._respond(200, render_login(),
+                              {"Content-Type": "text/html; charset=utf-8"})
+            return
+
+        if raw_path == ADMIN_PATH + "/classic":
+            if self._current_session():
                 self._respond(200, render_admin(get_routes(), self._public_base()),
                               {"Content-Type": "text/html; charset=utf-8"})
             else:
@@ -783,6 +1326,24 @@ class Handler(BaseHTTPRequestHandler):
                               {"Content-Type": "text/html; charset=utf-8"})
             return
 
+        # Сохранение графа из нодового редактора (JSON + CSRF, отдаёт JSON).
+        if raw_path == ADMIN_PATH + "/graph/save":
+            sess = self._current_session()
+            if not sess:
+                self._respond_json(401, {"ok": False, "errors": ["Сессия истекла, обновите страницу"]})
+                return
+            token = self.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(token, sess.get("csrf", "")):
+                self._respond_json(403, {"ok": False, "errors": ["Неверный CSRF-токен, обновите страницу"]})
+                return
+            data = self._read_json()
+            if data is None:
+                self._respond_json(400, {"ok": False, "errors": ["Некорректный JSON"]})
+                return
+            ok, errors = save_graph(data)
+            self._respond_json(200 if ok else 400, {"ok": ok, "errors": errors})
+            return
+
         # всё остальное требует авторизации
         if not self._current_session():
             self._redirect(ADMIN_PATH)
@@ -798,7 +1359,7 @@ class Handler(BaseHTTPRequestHandler):
             path = form.get("path", [""])[0].strip()
             title = form.get("title", [""])[0].strip()
             mode = form.get("mode", ["merge"])[0].strip()
-            upstreams = [u.strip() for u in form.get("upstreams", [""])[0].splitlines() if u.strip()]
+            upstreams = _parse_upstreams(form.get("upstreams", [""])[0])
             err = self._validate_route(path)
             if err:
                 self._respond(400, render_admin(get_routes(), self._public_base(), err, True),
@@ -808,7 +1369,7 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect(ADMIN_PATH)
             return
 
-        m = re.match(r"^" + re.escape(ADMIN_PATH) + r"/routes/([a-f0-9]+)/(update|delete)$", raw_path)
+        m = re.match(r"^" + re.escape(ADMIN_PATH) + r"/routes/([A-Za-z0-9_-]{1,64})/(update|delete)$", raw_path)
         if m:
             rid, action = m.group(1), m.group(2)
             if action == "delete":
@@ -827,7 +1388,7 @@ class Handler(BaseHTTPRequestHandler):
                 path=path,
                 title=form.get("title", [""])[0].strip(),
                 mode=form.get("mode", ["merge"])[0].strip(),
-                upstreams=[u.strip() for u in form.get("upstreams", [""])[0].splitlines() if u.strip()],
+                upstreams=_parse_upstreams(form.get("upstreams", [""])[0]),
                 enabled=("enabled" in form),
             )
             self._redirect(ADMIN_PATH)
