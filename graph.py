@@ -19,15 +19,15 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 RESERVED_PATHS = {"/healthz"}
 
 
-CUSTOM_TEXT_MAX = 20000
+ANNOUNCE_MAX = 8000
 
 
 def _new_id():
     return secrets.token_hex(8)
 
 
-def _norm_custom_text(v):
-    return str(v or "")[:CUSTOM_TEXT_MAX]
+def _norm_announce(v):
+    return str(v or "")[:ANNOUNCE_MAX]
 
 
 def _num(v, default=0.0):
@@ -140,15 +140,16 @@ def _creates_cycle(radj, fr, to):
 
 
 def resolve_links_spec(store, route):
-    """Полный набор для отдачи маршрута: (urls, custom_text) — источники и свой-текст
-    транзитивно через маршруты, подключённые на вход. Циклобезопасно."""
+    """Источники маршрута транзитивно (через маршруты на входе). → список url.
+    Циклобезопасно (visited). Текст под подпиской (announce) — отдельно, на сам
+    маршрут, не собирается с входов."""
     cfg = store.get_config() or {}
     routes_by_id = {r.get("id"): r for r in cfg.get("routes", []) if r.get("id")}
     src_by_id = {s.get("id"): s for s in cfg.get("sources", []) if s.get("id")}
     incoming = {}
     for e in cfg.get("edges", []):
         incoming.setdefault(e.get("to"), []).append(e.get("from"))
-    urls, seen, texts, visited = [], set(), [], set()
+    urls, seen, visited = [], set(), set()
     # Итеративный DFS (а не рекурсия) — глубина цепочки не упирается в лимит стека.
     stack = [route.get("id")]
     while stack:
@@ -160,9 +161,6 @@ def resolve_links_spec(store, route):
         if not r or not r.get("enabled", True):
             # выключенный маршрут не отдаёт свой контент даже как вход другого
             continue
-        ct = (r.get("custom_text") or "").strip()
-        if ct:
-            texts.append(ct)
         for fid in incoming.get(rid, []):
             if fid in src_by_id:
                 u = (src_by_id[fid].get("url") or "").strip()
@@ -171,7 +169,7 @@ def resolve_links_spec(store, route):
                     urls.append(u)
             elif fid in routes_by_id:
                 stack.append(fid)
-    return urls, "\n".join(texts)
+    return urls
 
 
 # ── чтение ────────────────────────────────────────────────────────────────
@@ -199,13 +197,13 @@ def find_route(store, path):
 
 
 # ── запись через Store ────────────────────────────────────────────────────
-def add_route(store, path, title, upstreams, mode, custom_text=""):
+def add_route(store, path, title, upstreams, mode, announce=""):
     def mut(cfg):
         _ensure_keys(cfg)
         cfg["routes"].append({
             "id": _new_id(), "path": normalize_path(path), "title": title,
             "upstreams": upstreams, "mode": mode, "enabled": True,
-            "custom_text": _norm_custom_text(custom_text),
+            "announce": _norm_announce(announce),
         })
         sync_graph_from_routes(cfg)
     store.update_config(mut)
@@ -223,8 +221,8 @@ def update_route(store, route_id, **fields):
                 for k in ("title", "mode", "upstreams"):
                     if k in fields:
                         r[k] = fields[k]
-                if "custom_text" in fields:
-                    r["custom_text"] = _norm_custom_text(fields["custom_text"])
+                if "announce" in fields:
+                    r["announce"] = _norm_announce(fields["announce"])
                 if "enabled" in fields:
                     r["enabled"] = bool(fields["enabled"])
                 found[0] = True
@@ -328,7 +326,7 @@ def save_graph(store, data):
         routes.append({
             "id": rid, "path": path, "title": title, "mode": mode,
             "enabled": enabled, "upstreams": [],
-            "custom_text": _norm_custom_text(r.get("custom_text")),
+            "announce": _norm_announce(r.get("announce")),
             "x": _num(r.get("x"), 520.0), "y": _num(r.get("y"), 80.0),
         })
 

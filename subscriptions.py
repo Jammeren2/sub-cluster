@@ -206,20 +206,22 @@ def fetch_upstream_cached(url):
     return body, headers
 
 
-def _profile_title_header(title):
-    encoded = base64.b64encode(title.encode("utf-8")).decode("ascii")
-    return "base64:" + encoded
+def _b64_header(text):
+    """Текст → 'base64:<b64>' — формат Happ для Profile-Title / Announce."""
+    return "base64:" + base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def build_mirror_response(route, url):
+def build_mirror_response(route, url, announce=""):
     body, headers = fetch_upstream_cached(url)
     headers = dict(headers)
     if route.get("title"):
-        headers["Profile-Title"] = _profile_title_header(route["title"])
+        headers["Profile-Title"] = _b64_header(route["title"])
+    if announce and announce.strip():  # свой текст под подпиской перебивает upstream
+        headers["Announce"] = _b64_header(announce.strip())
     return body, headers
 
 
-def build_merged_response(route, urls, custom_text=""):
+def build_merged_response(route, urls, announce=""):
     all_links = []
     seen = set()
     infos = []
@@ -236,30 +238,27 @@ def build_merged_response(route, urls, custom_text=""):
         ui = headers.get("Subscription-Userinfo")
         if ui:
             infos.append(_parse_userinfo(ui))
-    # свой sub-текст маршрута (и транзитивно — из подключённых маршрутов)
-    if custom_text and custom_text.strip():
-        for link in extract_links(custom_text.encode("utf-8")):
-            if link not in seen:
-                seen.add(link)
-                all_links.append(link)
     payload = base64.b64encode(("\n".join(all_links)).encode("utf-8")).decode("ascii")
     out_headers = {
         "Content-Type": "text/plain; charset=utf-8",
         "Profile-Update-Interval": "12",
     }
     if route.get("title"):
-        out_headers["Profile-Title"] = _profile_title_header(route["title"])
+        out_headers["Profile-Title"] = _b64_header(route["title"])
+    if announce and announce.strip():
+        # текст под подпиской (показывается в клиенте), как заголовок Announce
+        out_headers["Announce"] = _b64_header(announce.strip())
     if infos:
         out_headers["Subscription-Userinfo"] = _aggregate_userinfo(infos)
     return payload.encode("ascii"), out_headers
 
 
-def build_route_response(route, urls=None, custom_text=""):
-    """urls/custom_text — разрешённый (транзитивный) набор. Если urls=None,
-    берём route['upstreams'] (обратная совместимость)."""
+def build_route_response(route, urls=None, announce=""):
+    """urls — разрешённый (транзитивный) набор источников. announce — текст под
+    подпиской (заголовок Announce). Если urls=None, берём route['upstreams']."""
     if urls is None:
         urls = route.get("upstreams", [])
     mode = route.get("mode", "merge")
-    if mode == "mirror" and len(urls) == 1 and not (custom_text or "").strip():
-        return build_mirror_response(route, urls[0])
-    return build_merged_response(route, urls, custom_text)
+    if mode == "mirror" and len(urls) == 1:
+        return build_mirror_response(route, urls[0], announce)
+    return build_merged_response(route, urls, announce)

@@ -148,9 +148,9 @@
     const p=el('input','mono'); p.value=r.path||''; p.placeholder='/custom/custom'; mask(p); bd.appendChild(p);
     bd.appendChild(el('label',null,'Режим'));
     const sel=el('select'); [['merge','Слияние'],['mirror','Зеркало']].forEach(m=>{ const o=el('option',null,m[1]); o.value=m[0]; if((r.mode||'merge')===m[0])o.selected=true; sel.appendChild(o); }); sel.addEventListener('change',()=>{ r.mode=sel.value; markDirty(); }); bd.appendChild(sel);
-    // свой sub-text (custom)
-    const det=el('details'); det.appendChild(el('summary',null,'Свой sub-текст (свои ссылки)'));
-    const ta=el('textarea','blur'); ta.value=r.custom_text||''; ta.placeholder='vless://... по одной в строке — добавятся к маршруту'; ta.addEventListener('input',()=>{ r.custom_text=ta.value; markDirty(); }); det.appendChild(ta); bd.appendChild(det);
+    // текст под подпиской (announce — показывается в клиенте)
+    const det=el('details'); det.appendChild(el('summary',null,'Текст под подпиской (announce)'));
+    const ta=el('textarea'); ta.value=r.announce||''; ta.placeholder='Бот — @mybot\nПоддержка — https://...'; ta.addEventListener('input',()=>{ r.announce=ta.value; markDirty(); }); det.appendChild(ta); bd.appendChild(det);
     // тумблер включён
     const chk=el('label','chk'); const sw=el('span','switch'); const cb=el('input'); cb.type='checkbox'; cb.checked=r.enabled!==false;
     const sl=el('span','slider'); sw.appendChild(cb); sw.appendChild(sl); cb.addEventListener('change',()=>{ r.enabled=cb.checked; markDirty(); });
@@ -187,7 +187,7 @@
 
   function centerWorld(){ const r=rect(); return {x:(r.width/2-view.panX)/view.zoom, y:(r.height/2-view.panY)/view.zoom}; }
   document.getElementById('addSrc').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeSource(s); redrawWires(); markDirty(); });
-  document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,custom_text:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
+  document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
   document.getElementById('save').addEventListener('click',()=>save(false));
 
@@ -207,7 +207,7 @@
     saving=true; setStat('… сохранение','dirty');
     const payload={
       sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',x:Math.round(s.x),y:Math.round(s.y)})),
-      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,custom_text:r.custom_text||'',x:Math.round(r.x),y:Math.round(r.y)})),
+      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,announce:r.announce||'',x:Math.round(r.x),y:Math.round(r.y)})),
       edges:G.edges.map(e=>({from:e.from,to:e.to}))
     };
     fetch(ADMIN+'/graph/save',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify(payload)})

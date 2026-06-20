@@ -128,7 +128,7 @@ def render_route_card(route, sub_base):
     enabled = route.get("enabled", True)
     upstreams = route.get("upstreams", [])
     ups_text = esc("\n".join(upstreams))
-    custom_text = esc(route.get("custom_text", "") or "")
+    announce = esc(route.get("announce", "") or "")
     full_url = esc(sub_base.rstrip("/") + (route.get("path", "") or ""))
     state = '<span class="tag on">включён</span>' if enabled else '<span class="tag off">выключен</span>'
     mode_label = "слияние" if mode != "mirror" else "зеркало"
@@ -148,7 +148,7 @@ def render_route_card(route, sub_base):
       <option value="mirror"{' selected' if mode == 'mirror' else ''}>Зеркало</option>
     </select>
     <label>Upstream-ссылки (по одной в строке)</label><textarea name="upstreams" class="blur">{ups_text}</textarea>
-    <label>Свой sub-текст (свои ссылки, добавятся к маршруту)</label><textarea name="custom_text" class="blur" placeholder="vless://...">{custom_text}</textarea>
+    <label>Текст под подпиской (announce — показывается в клиенте)</label><textarea name="announce" placeholder="Бот — @mybot&#10;Поддержка — https://...">{announce}</textarea>
     <label class="row" style="margin-top:10px"><input type="checkbox" name="enabled" value="1" style="width:auto"{' checked' if enabled else ''}> <span>Включён</span></label>
     <div class="row" style="margin-top:12px"><button class="btn small primary" type="submit">Сохранить</button></div>
   </form>
@@ -178,7 +178,7 @@ def render_classic(routes, sub_base, flash="", flash_err=False):
   <label>Путь подписки</label><input name="path" placeholder="/custom/custom" required>
   <label>Режим</label><select name="mode"><option value="merge">Слияние</option><option value="mirror">Зеркало</option></select>
   <label>Upstream-ссылки (по одной в строке)</label><textarea name="upstreams"></textarea>
-  <label>Свой sub-текст (свои ссылки)</label><textarea name="custom_text" placeholder="vless://..."></textarea>
+  <label>Текст под подпиской (announce)</label><textarea name="announce" placeholder="Бот — @mybot&#10;Поддержка — https://..."></textarea>
   <div style="margin-top:12px"><button class="btn primary" type="submit">Создать</button></div>
 </form></div>
 </div></body></html>"""

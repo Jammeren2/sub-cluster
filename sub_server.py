@@ -383,7 +383,7 @@ class AdminHandler(_Base):
             graph.add_route(STORE, p, form.get("title", [""])[0].strip(),
                             graph.parse_upstreams(form.get("upstreams", [""])[0]),
                             form.get("mode", ["merge"])[0].strip(),
-                            custom_text=form.get("custom_text", [""])[0])
+                            announce=form.get("announce", [""])[0])
             self._redirect("/classic")
             return
 
@@ -403,7 +403,7 @@ class AdminHandler(_Base):
             graph.update_route(STORE, rid, path=p, title=form.get("title", [""])[0].strip(),
                                mode=form.get("mode", ["merge"])[0].strip(),
                                upstreams=graph.parse_upstreams(form.get("upstreams", [""])[0]),
-                               custom_text=form.get("custom_text", [""])[0],
+                               announce=form.get("announce", [""])[0],
                                enabled=("enabled" in form))
             self._redirect("/classic")
             return
@@ -528,9 +528,10 @@ class SubHandler(_Base):
             d = self._device()
             print(f"[{self.log_date_time_string()}] DEVICE ip={d['ip']} hwid={d['hwid'] or '-'} "
                   f"model={d['model'] or '-'} app={d['app'] or '-'} ua=\"{d['ua']}\"", flush=True)
-            urls, custom_text = graph.resolve_links_spec(STORE, route)
+            urls = graph.resolve_links_spec(STORE, route)
+            announce = route.get("announce", "")
             try:
-                body, headers = subs.build_route_response(route, urls, custom_text)
+                body, headers = subs.build_route_response(route, urls, announce)
             except urllib.error.HTTPError as e:
                 self._respond(502, f"upstream HTTP {e.code}".encode())
             except Exception as e:
