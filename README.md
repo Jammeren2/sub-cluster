@@ -121,6 +121,36 @@ Caddy терминирует HTTPS для admin-домена узла и дом�
 
 ---
 
+## Редеплой узлов из панели (кнопка «Редеплой»)
+
+На вкладке `/cluster` у каждого узла есть кнопка **«Редеплой»** (если задан вебхук).
+Приложение само ничего не пересобирает (в контейнере нет git/docker) — оно **дёргает
+redeploy-вебхук узла**. Узел дёргает СВОЙ вебхук (поэтому вебхук может слушать localhost).
+
+Сначала на хостах настрой **git-доступ к приватному репо** (deploy-key или PAT), иначе
+`git pull` не пройдёт.
+
+**Узел с Coolify:** в поле «redeploy-вебхук» вставь его **deploy-webhook** из Coolify,
+в «redeploy-токен» — API-токен (уйдёт как `Authorization: Bearer`). Coolify сам сделает
+git pull + build.
+
+**Узел без Coolify:** запусти на ХОСТЕ агент `redeploy-agent.py` (он делает
+`git pull && docker compose -f docker-compose.standalone.yml up -d --build`):
+```bash
+REDEPLOY_TOKEN='секрет' REPO_DIR=/root/concord-sub-mirror \
+  python3 redeploy-agent.py    # слушает 0.0.0.0:9090 (закрой порт извне фаерволом)
+```
+В панели у узла:
+- redeploy-вебхук = `http://host.docker.internal:9090/redeploy`
+  (в compose у `app` есть `extra_hosts: host.docker.internal:host-gateway` — контейнер
+  достучится до агента на хосте);
+- redeploy-токен = тот же `REDEPLOY_TOKEN`.
+
+Токен хранится в БД **зашифрованным** (`SECRET_KEY`) и реплицируется по кластеру.
+Кнопка защищена: из UI — сессией, между узлами — HMAC.
+
+---
+
 ## Как работает фейловер
 
 - Каждые `poll_interval` сек узлы пингуют друг друга (через admin-домены по 443).

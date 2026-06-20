@@ -22,6 +22,9 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - cluster-data:/data
+    # чтобы контейнер мог дёрнуть redeploy-agent на ХОСТЕ (http://host.docker.internal:9090)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Наружу ничего публиковать не нужно: Caddy ходит к app по внутренней сети,
     # а другие узлы кластера — через ADMIN_DOMAIN по 443 (peer-API на 8080).
     expose:

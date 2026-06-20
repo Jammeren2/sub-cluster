@@ -245,6 +245,9 @@ class _Base(BaseHTTPRequestHandler):
                 payload = {}
             STORE.reset_stats(payload.get("route") or None)
             self._json(200, {"ok": True})
+        elif path == "/cluster/redeploy":
+            ok, msg = CLUSTER._fire_redeploy()
+            self._json(200, {"ok": ok, "msg": msg})
         elif path.startswith("/cluster/state/"):
             key = path.rsplit("/", 1)[-1]
             if key in ("config", "failover"):
@@ -323,7 +326,7 @@ class AdminHandler(_Base):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
 
         # peer-API кластера (POST, через admin-домен по 443) — HMAC, до сессии.
-        if path == "/cluster/reset-stats":
+        if path in ("/cluster/reset-stats", "/cluster/redeploy"):
             self._serve_cluster_api(path, self._read_body())
             return
 
@@ -421,23 +424,31 @@ class AdminHandler(_Base):
                 "label": f.get("label", [""])[0].strip(),
                 "public_ip": f.get("public_ip", [""])[0].strip(),
                 "cluster_url": f.get("cluster_url", [""])[0].strip(),
+                "redeploy_url": f.get("redeploy_url", [""])[0].strip(),
+                "redeploy_token": f.get("redeploy_token", [""])[0],
                 "priority": int(f.get("priority", ["100"])[0] or "100"),
                 "cluster_port": int(f.get("cluster_port", [str(CLUSTER_PORT)])[0] or CLUSTER_PORT),
             })
             self._redirect("/cluster")
             return
-        m = re.match(r"^/cluster/nodes/([A-Za-z0-9_.:-]{1,80})/(update|delete)$", path)
+        m = re.match(r"^/cluster/nodes/([A-Za-z0-9_.:-]{1,80})/(update|delete|redeploy)$", path)
         if m:
             nid, action = m.group(1), m.group(2)
             if action == "delete":
                 CLUSTER.remove_node(nid)
                 self._redirect("/cluster")
                 return
+            if action == "redeploy":
+                ok, msg = CLUSTER.trigger_redeploy(nid)
+                self._cluster_flash(ok, f"Редеплой {nid}: {msg}" if ok else f"Редеплой {nid} не запущен: {msg}")
+                return
             f = self._read_form()
             fields = {
                 "label": f.get("label", [""])[0].strip(),
                 "public_ip": f.get("public_ip", [""])[0].strip(),
                 "cluster_url": f.get("cluster_url", [""])[0].strip(),
+                "redeploy_url": f.get("redeploy_url", [""])[0].strip(),
+                "redeploy_token": f.get("redeploy_token", [""])[0],
                 "enabled": ("enabled" in f),
             }
             for numf in ("priority", "cluster_port", "admin_port", "sub_port"):

@@ -391,6 +391,47 @@ class Cluster:
             fo["pinned_ts"] = time.time()
         self.store.update_failover(mut)
 
+    # ── редеплой по вебхуку ───────────────────────────────────────────────
+    def _fire_redeploy(self):
+        """Дёргает СВОЙ redeploy-вебхук (Coolify deploy-webhook или локальный агент)."""
+        me = self.find_node(self.id) or {}
+        url = (me.get("redeploy_url") or "").strip()
+        if not url:
+            return False, "redeploy_url не задан для этого узла"
+        token = secretbox.decrypt(me.get("redeploy_token_enc") or "")
+        try:
+            req = urllib.request.Request(url, data=b"{}", method="POST")
+            req.add_header("Content-Type", "application/json")
+            if token:
+                req.add_header("Authorization", "Bearer " + token)
+            ctx = _SSL_CTX if url.lower().startswith("https") else None
+            with urllib.request.urlopen(req, timeout=self.http_timeout, context=ctx) as resp:
+                code = resp.getcode()
+                resp.read()
+            print(f"[cluster] redeploy fired -> {url} HTTP {code}", flush=True)
+            return (200 <= code < 300), f"HTTP {code}"
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP {e.code}"
+        except Exception as e:
+            return False, str(e)[:140]
+
+    def trigger_redeploy(self, node_id):
+        """Запустить редеплой узла: если это мы — дёргаем свой вебхук, иначе просим
+        целевой узел дёрнуть свой (peer-API), чтобы вебхук мог быть и localhost-only."""
+        if node_id == self.id:
+            return self._fire_redeploy()
+        n = self.find_node(node_id)
+        if not n:
+            return False, "узел не найден"
+        base = self._peer_base(n)
+        if not base:
+            return False, "нет адреса узла"
+        try:
+            r = self._http(base, "/cluster/redeploy", method="POST", payload={})
+            return bool(r.get("ok")), r.get("msg", "")
+        except Exception as e:
+            return False, str(e)[:140]
+
     # ── управление участниками из UI ──────────────────────────────────────
     def members_doc(self):
         return self.store.members_doc()
@@ -398,9 +439,12 @@ class Cluster:
     def set_node(self, node_id, fields):
         """UI-правка записи узла (label/priority/enabled/public_ip/порты)."""
         clean = {}
-        for k in ("label", "public_ip", "cluster_url", "priority", "cluster_port", "admin_port", "sub_port", "enabled"):
+        for k in ("label", "public_ip", "cluster_url", "redeploy_url",
+                  "priority", "cluster_port", "admin_port", "sub_port", "enabled"):
             if k in fields:
                 clean[k] = fields[k]
+        if fields.get("redeploy_token"):  # пустой — не менять
+            clean["redeploy_token_enc"] = secretbox.encrypt(fields["redeploy_token"])
         if clean:
             self.store.upsert_member(node_id, clean, self.id)
 
@@ -411,6 +455,7 @@ class Cluster:
             "label": fields.get("label") or nid,
             "public_ip": fields.get("public_ip", ""),
             "cluster_url": (fields.get("cluster_url") or "").strip().rstrip("/"),
+            "redeploy_url": (fields.get("redeploy_url") or "").strip(),
             "priority": int(fields.get("priority", 100)),
             "cluster_port": int(fields.get("cluster_port", self.cluster_port)),
             "admin_port": int(fields.get("admin_port", self.admin_port)),
@@ -608,6 +653,8 @@ class Cluster:
                 "id": nid, "label": n.get("label") or nid,
                 "public_ip": n.get("public_ip", ""),
                 "cluster_url": n.get("cluster_url", ""),
+                "redeploy_url": n.get("redeploy_url", ""),
+                "has_redeploy_token": bool(n.get("redeploy_token_enc")),
                 "priority": n.get("priority", 100),
                 "enabled": n.get("enabled", True),
                 "cluster_port": n.get("cluster_port", self.cluster_port),

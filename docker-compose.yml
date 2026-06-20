@@ -49,6 +49,9 @@ services:
       CACHE_TTL: "${CACHE_TTL:-60}"
     volumes:
       - cluster-data:/data
+    # чтобы контейнер мог дёрнуть локальный redeploy-вебхук на хосте (если используешь агент)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Домены admin/sub проксирует Coolify по внутренней сети (порты 8080/8081).
     expose:
       - "8080"

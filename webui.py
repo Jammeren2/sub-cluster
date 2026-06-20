@@ -59,6 +59,13 @@ form.inline{display:inline}
 .mono{font-family:ui-monospace,Consolas,monospace}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .help{color:#8a93a2;font-size:12px;margin-top:4px}
+.chk{display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:#cfd3da}
+.switch{position:relative;display:inline-block;width:34px;height:18px;flex:none}
+.switch input{opacity:0;width:0;height:0;position:absolute}
+.switch .slider{position:absolute;inset:0;background:#2b313d;border-radius:999px;transition:.15s;cursor:pointer}
+.switch .slider:before{content:'';position:absolute;width:14px;height:14px;left:2px;top:2px;background:#cfcfd6;border-radius:50%;transition:.15s}
+.switch input:checked + .slider{background:#2f8f86}
+.switch input:checked + .slider:before{transform:translateX(16px);background:#fff}
 fieldset{border:1px solid #232833;border-radius:10px;padding:14px 16px;margin:0 0 16px}
 legend{color:#cfd3da;font-size:13px;padding:0 6px}
 """
@@ -208,15 +215,22 @@ def render_cluster(status, sub_base, flash="", flash_err=False):
             actions += (f'<form class="inline" method="post" action="/cluster/switch">'
                         f'<input type="hidden" name="node" value="{esc(n["id"])}">'
                         f'<button class="btn small" type="submit">Сделать активным</button></form> ')
+        if n.get("redeploy_url"):
+            actions += (f'<form class="inline" method="post" action="/cluster/nodes/{esc(n["id"])}/redeploy" '
+                        f'onsubmit="return confirm(\'Запустить редеплой узла {esc(n["label"])}?\')">'
+                        f'<button class="btn small" type="submit">Редеплой</button></form> ')
+        token_ph = "токен задан — пусто = не менять" if n.get("has_redeploy_token") else "токен (Coolify Bearer и т.п.)"
         actions += (f'<details style="display:inline-block"><summary class="muted" style="cursor:pointer;display:inline">изм.</summary>'
                     f'<form method="post" action="/cluster/nodes/{esc(n["id"])}/update" style="margin-top:6px">'
                     f'<input name="label" value="{esc(n["label"])}" placeholder="метка">'
                     f'<input name="public_ip" value="{esc(n["public_ip"])}" placeholder="публичный IP (для DNS подписок)" class="mono">'
                     f'<input name="cluster_url" value="{esc(n.get("cluster_url",""))}" placeholder="https://adminN.домен (адрес для пиров)" class="mono">'
+                    f'<input name="redeploy_url" value="{esc(n.get("redeploy_url",""))}" placeholder="redeploy-вебхук (Coolify deploy-webhook / агент)" class="mono">'
+                    f'<input name="redeploy_token" type="password" placeholder="{esc(token_ph)}">'
                     f'<input name="priority" value="{esc(n["priority"])}" placeholder="приоритет" type="number">'
                     f'<input name="cluster_port" value="{esc(n["cluster_port"])}" placeholder="cluster-порт (фолбэк по IP)" type="number">'
-                    f'<label class="row" style="margin-top:6px"><input type="checkbox" name="enabled" value="1" style="width:auto"{" checked" if n["enabled"] else ""}> <span>включён</span></label>'
-                    f'<div style="margin-top:6px"><button class="btn small" type="submit">Сохранить</button></div></form>')
+                    f'<label class="chk"><span class="switch"><input type="checkbox" name="enabled" value="1"{" checked" if n["enabled"] else ""}><span class="slider"></span></span> <span>включён</span></label>'
+                    f'<div style="margin-top:6px"><button class="btn small primary" type="submit">Сохранить</button></div></form>')
         if not n["is_self"]:
             actions += (f'<form class="inline" method="post" action="/cluster/nodes/{esc(n["id"])}/delete" '
                         f'onsubmit="return confirm(\'Удалить узел?\')"><button class="btn small red" type="submit">×</button></form>')
@@ -267,9 +281,12 @@ def render_cluster(status, sub_base, flash="", flash_err=False):
   <div style="grid-column:1/3"><label>Адрес для пиров (статичный admin-домен)</label><input name="cluster_url" class="mono" placeholder="https://admin2.example.net"></div>
   <div><label>Приоритет (меньше = важнее)</label><input name="priority" type="number" value="100"></div>
   <div><label>Cluster-порт (фолбэк по IP)</label><input name="cluster_port" type="number" value="8083"></div>
-  <div style="grid-column:1/3"><button class="btn" type="submit">Добавить</button></div>
+  <div style="grid-column:1/3"><label>Redeploy-вебхук (необязательно)</label><input name="redeploy_url" class="mono" placeholder="Coolify deploy-webhook или http://host.docker.internal:9090/redeploy"></div>
+  <div style="grid-column:1/3"><label>Redeploy-токен (необязательно)</label><input name="redeploy_token" type="password" placeholder="Bearer-токен / секрет агента"></div>
+  <div style="grid-column:1/3"><button class="btn primary" type="submit">Добавить</button></div>
 </form>
-<div class="help">Узел и сам зарегистрируется, когда запустится с этим NODE_ID и CLUSTER_URL и увидит кластер; запись тут — чтобы остальные знали его адрес заранее.</div>
+<div class="help">Узел и сам зарегистрируется, когда запустится с этим NODE_ID и CLUSTER_URL и увидит кластер; запись тут — чтобы остальные знали его адрес заранее.
+Redeploy-вебхук: Coolify — его deploy-webhook (сам делает git pull+build); standalone — агент redeploy-agent.py на хосте.</div>
 </div>
 <div class="card"><div class="route-title">Журнал переключений</div><div style="margin-top:8px">{hist or '<span class="muted">пусто</span>'}</div></div>
 </div></body></html>"""
