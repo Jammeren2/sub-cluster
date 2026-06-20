@@ -337,10 +337,12 @@ def render_stats(stats, routes, node_id, sub_base):
         rows = []
         for d in st.get("devices", []):
             label = esc(d.get("hwid") or d.get("device") or "—")
+            nodes = esc(", ".join(d.get("nodes", []))) or "—"
             rows.append(
                 f'<tr><td><span class="mono">{label[:20]}</span></td>'
                 f'<td>{esc(d.get("model") or "—")}</td><td>{esc(d.get("app") or "—")}</td>'
                 f'<td class="mono">{esc(d.get("ip") or "—")}</td><td>{esc(d.get("cnt"))}</td>'
+                f'<td class="muted">{nodes}</td>'
                 f'<td class="muted">{esc(_ago(d.get("last_ts")))}</td></tr>')
         blocks.append(
             f'<div class="card"><div class="route-head"><div>'
@@ -349,23 +351,24 @@ def render_stats(stats, routes, node_id, sub_base):
             f'<div style="text-align:right"><div class="route-title">{esc(st.get("requests",0))}</div>'
             f'<div class="muted">запросов · устройств: {len(st.get("devices",[]))}</div></div></div>'
             f'<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Устройства</summary>'
-            f'<table class="tbl" style="margin-top:8px"><thead><tr><th>HWID</th><th>Модель</th><th>Клиент</th><th>IP</th><th>Запр.</th><th>Активность</th></tr></thead>'
+            f'<table class="tbl" style="margin-top:8px"><thead><tr><th>HWID</th><th>Модель</th><th>Клиент</th><th>IP</th><th>Запр.</th><th>Узлы</th><th>Активность</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></details>'
             f'<form class="inline" method="post" action="/stats/reset" style="margin-top:8px">'
             f'<input type="hidden" name="route" value="{esc(rid)}">'
-            f'<button class="btn small ghost" type="submit">Сбросить по маршруту</button></form></div>')
-    body = "".join(blocks) or '<div class="card muted">Пока нет обращений к маршрутам на этом узле.</div>'
+            f'<button class="btn small ghost" type="submit">Сбросить (локально)</button></form></div>')
+    body = "".join(blocks) or '<div class="card muted">Пока нет обращений к маршрутам в кластере.</div>'
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Статистика — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
 <body><div class="wrap">
 <h1>Статистика</h1>
 <div style="margin:8px 0 16px">{nav_links("/stats")}</div>
-<div class="muted" style="margin-bottom:12px">Считается локально на этом узле (<b>{esc(node_id)}</b>) —
-обращения клиентов к подпискам. Поскольку домен подписок указывает на активный узел,
-основная статистика накапливается там, где сейчас активный.
+<div class="muted" style="margin-bottom:12px">Сводно по <b>всему кластеру</b>: запросы клиентов
+к подпискам со всех живых узлов (опрашиваются на лету). Столбец «Узлы» — на каких узлах
+видели устройство. Этот узел: <b>{esc(node_id)}</b>. Сброс действует только локально на узле,
+открывшем страницу.
 <button class="btn small gray" onclick="document.body.classList.toggle('unblur')">Показать/скрыть пути</button></div>
 {body}
 <form class="inline" method="post" action="/stats/reset" style="margin-top:8px">
-  <button class="btn small ghost" type="submit" onclick="return confirm('Сбросить всю статистику узла?')">Сбросить всё</button></form>
+  <button class="btn small ghost" type="submit" onclick="return confirm('Сбросить статистику этого узла?')">Сбросить всё (локально)</button></form>
 </div></body></html>"""

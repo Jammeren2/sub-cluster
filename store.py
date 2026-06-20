@@ -363,6 +363,16 @@ class Store:
             e["devices"].append(d)
         return out
 
+    def get_stats_rows(self):
+        """Сырые строки статистики этого узла (для отдачи пирам)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts FROM device_seen"
+                " ORDER BY last_ts DESC LIMIT 5000"
+            ).fetchall()
+        return [{"route_id": r[0], "device": r[1], "hwid": r[2], "model": r[3], "app": r[4],
+                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8]} for r in rows]
+
     def reset_stats(self, route_id=None):
         with self._lock:
             if route_id:

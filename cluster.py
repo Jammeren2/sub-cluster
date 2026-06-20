@@ -510,6 +510,60 @@ class Cluster:
             if self.priority < active_prio and cooldown_ok:
                 self.seize(by="auto-failback")
 
+    # ── агрегированная статистика по кластеру ─────────────────────────────
+    def stats_doc(self):
+        """Статистика этого узла для пиров."""
+        return {"node": self.id, "rows": self.store.get_stats_rows()}
+
+    def cluster_stats(self):
+        """Суммирует статистику со всех живых узлов (read-time, без синка счётчиков).
+        → {route_id: {requests, devices:[{...,nodes:[...]}]}}"""
+        settings = self.store.get_settings()
+        nodes = self.get_nodes()
+        alive = self.alive_ids(nodes, int(settings.get("fail_threshold", 3)))
+        sources = [(self.id, self.store.get_stats_rows())]
+        for n in nodes:
+            nid = n.get("id")
+            if nid == self.id or nid not in alive:
+                continue
+            base = self._peer_base(n)
+            if not base:
+                continue
+            try:
+                data = self._http(base, "/cluster/stats")
+                sources.append((data.get("node") or nid, data.get("rows") or []))
+            except Exception:
+                pass
+        agg = {}
+        for node_id, rows in sources:
+            for r in rows:
+                key = (r.get("route_id"), r.get("device"))
+                e = agg.get(key)
+                if e is None:
+                    e = {"route_id": r.get("route_id"), "device": r.get("device"),
+                         "hwid": r.get("hwid"), "model": r.get("model"), "app": r.get("app"),
+                         "ip": r.get("ip"), "cnt": 0, "last_ts": 0,
+                         "first_ts": r.get("first_ts") or 0, "nodes": set()}
+                    agg[key] = e
+                e["cnt"] += int(r.get("cnt") or 0)
+                lt = float(r.get("last_ts") or 0)
+                if lt > e["last_ts"]:
+                    e["last_ts"] = lt
+                    e["model"], e["app"], e["ip"], e["hwid"] = r.get("model"), r.get("app"), r.get("ip"), r.get("hwid")
+                ft = float(r.get("first_ts") or 0)
+                if ft and (not e["first_ts"] or ft < e["first_ts"]):
+                    e["first_ts"] = ft
+                e["nodes"].add(node_id)
+        out = {}
+        for e in agg.values():
+            ro = out.setdefault(e["route_id"], {"requests": 0, "devices": []})
+            ro["requests"] += e["cnt"]
+            e["nodes"] = sorted(e["nodes"])
+            ro["devices"].append(e)
+        for ro in out.values():
+            ro["devices"].sort(key=lambda d: d.get("last_ts") or 0, reverse=True)
+        return out
+
     # ── статус для UI / API ───────────────────────────────────────────────
     def ping_view(self):
         settings = self.store.get_settings()

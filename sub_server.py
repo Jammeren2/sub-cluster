@@ -222,7 +222,7 @@ class _Base(BaseHTTPRequestHandler):
 
     # peer-API кластера (HMAC). Обслуживается и на cluster-порту, и на admin-порту
     # (чтобы узлы ходили друг к другу через статичный admin-домен по 443).
-    CLUSTER_API_PATHS = ("/cluster/ping", "/cluster/members")
+    CLUSTER_API_PATHS = ("/cluster/ping", "/cluster/members", "/cluster/stats")
 
     @staticmethod
     def is_cluster_api(path):
@@ -236,6 +236,8 @@ class _Base(BaseHTTPRequestHandler):
             self._json(200, CLUSTER.ping_view())
         elif path == "/cluster/members":
             self._json(200, CLUSTER.members_doc())
+        elif path == "/cluster/stats":
+            self._json(200, CLUSTER.stats_doc())
         elif path.startswith("/cluster/state/"):
             key = path.rsplit("/", 1)[-1]
             if key in ("config", "failover"):
@@ -298,7 +300,7 @@ class AdminHandler(_Base):
         elif path == "/cluster":
             self._html(200, webui.render_cluster(CLUSTER.status(), sub_public_base()))
         elif path == "/stats":
-            self._html(200, webui.render_stats(STORE.get_stats(), graph.get_routes(STORE),
+            self._html(200, webui.render_stats(CLUSTER.cluster_stats(), graph.get_routes(STORE),
                                                CLUSTER.id, sub_public_base()))
         elif path == "/settings":
             s = STORE.get_settings()
