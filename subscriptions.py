@@ -221,36 +221,85 @@ def build_mirror_response(route, url, announce=""):
     return body, headers
 
 
+# Заголовки upstream, которые имеет смысл пробросить в слитую подписку (режим Happ).
+_MERGE_PASSTHROUGH = ("Pro-Mode", "Protocols-Hidden", "Use-Progress-Bar",
+                      "Support-Url", "Profile-Web-Page-Url")
+
+
 def build_merged_response(route, urls, announce=""):
-    all_links = []
-    seen = set()
+    """Слияние нескольких ключей в один. Если upstream'ы отдают JSON-конфиги
+    (формат Happ/xray с routing/балансерами) — СКЛЕИВАЕМ массивы конфигов, сохраняя
+    формат (как /s/sub). Если base64/текст-списки — отдаём base64-список ссылок."""
+    json_configs = []
+    seen_cfg = set()
+    text_links = []
+    seen_link = set()
     infos = []
+    passthrough = {}
     for url in urls:
         try:
             body, headers = fetch_upstream_cached(url)
         except Exception as e:
             print(f"[-] upstream {url} недоступен: {e}", flush=True)
             continue
-        for link in extract_links(body):
-            if link not in seen:
-                seen.add(link)
-                all_links.append(link)
         ui = headers.get("Subscription-Userinfo")
         if ui:
             infos.append(_parse_userinfo(ui))
-    payload = base64.b64encode(("\n".join(all_links)).encode("utf-8")).decode("ascii")
-    out_headers = {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Profile-Update-Interval": "12",
-    }
+        for k in _MERGE_PASSTHROUGH:
+            if k not in passthrough and headers.get(k):
+                passthrough[k] = headers[k]
+        text = body.decode("utf-8", errors="ignore").strip()
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list):
+            cfgs = parsed
+        elif isinstance(parsed, dict):
+            cfgs = [parsed]
+        else:
+            cfgs = None
+        if cfgs is not None:
+            for cfg in cfgs:
+                key = json.dumps(cfg, sort_keys=True, ensure_ascii=False)
+                if key not in seen_cfg:
+                    seen_cfg.add(key)
+                    json_configs.append(cfg)
+        else:
+            for link in extract_links(body):
+                if link not in seen_link:
+                    seen_link.add(link)
+                    text_links.append(link)
+
+    if json_configs and not text_links:
+        # все источники — JSON-конфиги: склеиваем массивы (сохраняем формат Happ)
+        payload = json.dumps(json_configs, ensure_ascii=False).encode("utf-8")
+        out_headers = {"Content-Type": "application/json; charset=utf-8"}
+        out_headers.update(passthrough)
+    elif text_links and not json_configs:
+        payload = base64.b64encode(("\n".join(text_links)).encode("utf-8")).decode("ascii").encode("ascii")
+        out_headers = {"Content-Type": "text/plain; charset=utf-8"}
+    else:
+        # смешанные источники (или пусто) — сводим всё к base64-списку ссылок
+        all_links = list(text_links)
+        seen = set(text_links)
+        for cfg in json_configs:
+            for ob, rem in _find_vless_outbounds(cfg):
+                link = _vless_from_outbound(ob, rem)
+                if link and link not in seen:
+                    seen.add(link)
+                    all_links.append(link)
+        payload = base64.b64encode(("\n".join(all_links)).encode("utf-8")).decode("ascii").encode("ascii")
+        out_headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+    out_headers.setdefault("Profile-Update-Interval", "12")
     if route.get("title"):
         out_headers["Profile-Title"] = _b64_header(route["title"])
     if announce and announce.strip():
-        # текст под подпиской (показывается в клиенте), как заголовок Announce
         out_headers["Announce"] = _b64_header(announce.strip())
     if infos:
         out_headers["Subscription-Userinfo"] = _aggregate_userinfo(infos)
-    return payload.encode("ascii"), out_headers
+    return payload, out_headers
 
 
 def build_route_response(route, urls=None, announce=""):
