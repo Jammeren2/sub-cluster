@@ -515,6 +515,24 @@ class Cluster:
         """Статистика этого узла для пиров."""
         return {"node": self.id, "rows": self.store.get_stats_rows()}
 
+    def reset_stats_cluster(self, route_id=None):
+        """Сбросить статистику локально и разослать сброс живым узлам."""
+        self.store.reset_stats(route_id)
+        settings = self.store.get_settings()
+        alive = self.alive_ids(self.get_nodes(), int(settings.get("fail_threshold", 3)))
+        for n in self.get_nodes():
+            nid = n.get("id")
+            if nid == self.id or nid not in alive:
+                continue
+            base = self._peer_base(n)
+            if not base:
+                continue
+            try:
+                self._http(base, "/cluster/reset-stats", method="POST",
+                           payload=({"route": route_id} if route_id else {}))
+            except Exception:
+                pass
+
     def cluster_stats(self):
         """Суммирует статистику со всех живых узлов (read-time, без синка счётчиков).
         → {route_id: {requests, devices:[{...,nodes:[...]}]}}"""

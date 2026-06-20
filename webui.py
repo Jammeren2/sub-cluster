@@ -355,7 +355,7 @@ def render_stats(stats, routes, node_id, sub_base):
             f'<tbody>{"".join(rows)}</tbody></table></details>'
             f'<form class="inline" method="post" action="/stats/reset" style="margin-top:8px">'
             f'<input type="hidden" name="route" value="{esc(rid)}">'
-            f'<button class="btn small ghost" type="submit">Сбросить (локально)</button></form></div>')
+            f'<button class="btn small ghost" type="submit">Сбросить по кластеру</button></form></div>')
     body = "".join(blocks) or '<div class="card muted">Пока нет обращений к маршрутам в кластере.</div>'
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -365,10 +365,10 @@ def render_stats(stats, routes, node_id, sub_base):
 <div style="margin:8px 0 16px">{nav_links("/stats")}</div>
 <div class="muted" style="margin-bottom:12px">Сводно по <b>всему кластеру</b>: запросы клиентов
 к подпискам со всех живых узлов (опрашиваются на лету). Столбец «Узлы» — на каких узлах
-видели устройство. Этот узел: <b>{esc(node_id)}</b>. Сброс действует только локально на узле,
-открывшем страницу.
+видели устройство. Этот узел: <b>{esc(node_id)}</b>. Сброс рассылается на все живые
+узлы (узел, который сейчас офлайн, обнулится только когда вернётся — вручную).
 <button class="btn small gray" onclick="document.body.classList.toggle('unblur')">Показать/скрыть пути</button></div>
 {body}
 <form class="inline" method="post" action="/stats/reset" style="margin-top:8px">
-  <button class="btn small ghost" type="submit" onclick="return confirm('Сбросить статистику этого узла?')">Сбросить всё (локально)</button></form>
+  <button class="btn small ghost" type="submit" onclick="return confirm('Сбросить статистику по всему кластеру?')">Сбросить всё (по кластеру)</button></form>
 </div></body></html>"""

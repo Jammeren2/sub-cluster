@@ -238,6 +238,13 @@ class _Base(BaseHTTPRequestHandler):
             self._json(200, CLUSTER.members_doc())
         elif path == "/cluster/stats":
             self._json(200, CLUSTER.stats_doc())
+        elif path == "/cluster/reset-stats":
+            try:
+                payload = json.loads(body or b"{}")
+            except Exception:
+                payload = {}
+            STORE.reset_stats(payload.get("route") or None)
+            self._json(200, {"ok": True})
         elif path.startswith("/cluster/state/"):
             key = path.rsplit("/", 1)[-1]
             if key in ("config", "failover"):
@@ -314,6 +321,11 @@ class AdminHandler(_Base):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
+
+        # peer-API кластера (POST, через admin-домен по 443) — HMAC, до сессии.
+        if path == "/cluster/reset-stats":
+            self._serve_cluster_api(path, self._read_body())
+            return
 
         if path == "/login":
             ip = self._client_ip()
@@ -440,7 +452,7 @@ class AdminHandler(_Base):
 
         # ── статистика ──
         if path == "/stats/reset":
-            STORE.reset_stats(self._read_form().get("route", [""])[0].strip() or None)
+            CLUSTER.reset_stats_cluster(self._read_form().get("route", [""])[0].strip() or None)
             self._redirect("/stats")
             return
 
