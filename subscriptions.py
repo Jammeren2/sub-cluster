@@ -226,6 +226,58 @@ _MERGE_PASSTHROUGH = ("Pro-Mode", "Protocols-Hidden", "Use-Progress-Bar",
                       "Support-Url", "Profile-Web-Page-Url")
 
 
+def _vless_to_outbound(url, tag="proxy"):
+    """vless://... → xray-outbound (обратное к _vless_from_outbound). → (outbound, name) или (None,None)."""
+    try:
+        u = urllib.parse.urlsplit(url)
+        if u.scheme.lower() != "vless" or not u.hostname:
+            return None, None
+        q = urllib.parse.parse_qs(u.query)
+        g = lambda k: (q.get(k, [""])[0])
+        name = urllib.parse.unquote(u.fragment) if u.fragment else u.hostname
+        net = g("type") or "tcp"
+        sec = g("security") or "none"
+        flow = g("flow")
+        stream = {"network": net, "security": sec}
+        if sec == "reality":
+            stream["realitySettings"] = {"publicKey": g("pbk"), "fingerprint": g("fp") or "chrome",
+                                         "serverName": g("sni"), "shortId": g("sid"), "spiderX": g("spx") or "/"}
+        elif sec == "tls":
+            stream["tlsSettings"] = {"serverName": g("sni"), "fingerprint": g("fp") or "chrome",
+                                     "allowInsecure": False}
+        if net == "ws":
+            stream["wsSettings"] = {"path": g("path") or "/", "headers": {"Host": g("host")}}
+        elif net == "grpc":
+            stream["grpcSettings"] = {"serviceName": g("serviceName")}
+        user = {"id": u.username or "", "encryption": "none"}
+        if flow:
+            user["flow"] = flow
+        ob = {"tag": tag, "protocol": "vless",
+              "settings": {"vnext": [{"address": u.hostname, "port": u.port or 443, "users": [user]}]},
+              "streamSettings": stream}
+        return ob, name
+    except Exception:
+        return None, None
+
+
+def _wrap_as_config(outbound, name):
+    """Одиночная нода → самодостаточный xray-конфиг (элемент массива Happ)."""
+    return {
+        "remarks": name,
+        "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
+        "inbounds": [
+            {"tag": "socks", "port": 10808, "listen": "127.0.0.1", "protocol": "socks",
+             "settings": {"udp": True}},
+            {"tag": "http", "port": 10809, "listen": "127.0.0.1", "protocol": "http"},
+        ],
+        "outbounds": [outbound,
+                      {"protocol": "freedom", "tag": "direct"},
+                      {"protocol": "blackhole", "tag": "block"}],
+        "routing": {"domainStrategy": "AsIs",
+                    "rules": [{"type": "field", "outboundTag": "proxy", "network": "tcp,udp"}]},
+    }
+
+
 def build_merged_response(route, urls, announce=""):
     """Слияние нескольких ключей в один. Если upstream'ы отдают JSON-конфиги
     (формат Happ/xray с routing/балансерами) — СКЛЕИВАЕМ массивы конфигов, сохраняя
@@ -279,17 +331,35 @@ def build_merged_response(route, urls, announce=""):
     elif text_links and not json_configs:
         payload = base64.b64encode(("\n".join(text_links)).encode("utf-8")).decode("ascii").encode("ascii")
         out_headers = {"Content-Type": "text/plain; charset=utf-8"}
+    elif json_configs and text_links:
+        # смешанные источники: JSON-конфиги оставляем сгруппированными, а плоские
+        # vless-ссылки оборачиваем в отдельные конфиги (чтобы группировка JSON не терялась).
+        wrapped, leftover = [], []
+        for link in text_links:
+            ob, name = _vless_to_outbound(link)
+            if ob:
+                wrapped.append(_wrap_as_config(ob, name))
+            else:
+                leftover.append(link)
+        if not leftover:
+            payload = json.dumps(json_configs + wrapped, ensure_ascii=False).encode("utf-8")
+            out_headers = {"Content-Type": "application/json; charset=utf-8"}
+            out_headers.update(passthrough)
+        else:
+            # есть не-vless ссылки, которые так не обернуть — сводим всё к base64-списку
+            all_links = list(text_links)
+            seen = set(text_links)
+            for cfg in json_configs:
+                for ob, rem in _find_vless_outbounds(cfg):
+                    link = _vless_from_outbound(ob, rem)
+                    if link and link not in seen:
+                        seen.add(link)
+                        all_links.append(link)
+            payload = base64.b64encode(("\n".join(all_links)).encode("utf-8")).decode("ascii").encode("ascii")
+            out_headers = {"Content-Type": "text/plain; charset=utf-8"}
     else:
-        # смешанные источники (или пусто) — сводим всё к base64-списку ссылок
-        all_links = list(text_links)
-        seen = set(text_links)
-        for cfg in json_configs:
-            for ob, rem in _find_vless_outbounds(cfg):
-                link = _vless_from_outbound(ob, rem)
-                if link and link not in seen:
-                    seen.add(link)
-                    all_links.append(link)
-        payload = base64.b64encode(("\n".join(all_links)).encode("utf-8")).decode("ascii").encode("ascii")
+        # ничего не нашли
+        payload = base64.b64encode(b"").decode("ascii").encode("ascii")
         out_headers = {"Content-Type": "text/plain; charset=utf-8"}
 
     out_headers.setdefault("Profile-Update-Interval", "12")
