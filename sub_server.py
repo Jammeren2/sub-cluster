@@ -20,7 +20,9 @@ import re
 import json
 import time
 import hmac
+import socket
 import secrets
+import ipaddress
 import threading
 import urllib.parse
 import urllib.error
@@ -127,6 +129,38 @@ def _host_of(url):
         return None
     h = urllib.parse.urlsplit(url if "://" in url else "https://" + url).hostname
     return h.lower() if h else None
+
+
+def _safe_outbound_url(url):
+    """Защита от SSRF на /graph/preview: только http(s), и хост не должен резолвиться
+    в приватные/loopback/link-local/служебные адреса (метадата 169.254.169.254,
+    RFC1918, localhost). → (ok, причина). Каветка: TOCTOU/DNS-rebinding не закрыт —
+    эндпоинт только для аутентифицированного админа, цель — отсечь тривиальный SSRF."""
+    try:
+        u = urllib.parse.urlsplit((url or "").strip())
+        scheme = (u.scheme or "").lower()
+        host = u.hostname
+        port = u.port
+    except Exception:
+        return False, "Некорректный URL"
+    if scheme not in ("http", "https"):
+        return False, "Только http(s)"
+    if not host:
+        return False, "Нет хоста"
+    try:
+        infos = socket.getaddrinfo(host, port or (443 if scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except Exception as e:
+        return False, f"DNS: {e}"
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False, "Плохой IP"
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified):
+            return False, "Адрес запрещён (внутренний/служебный)"
+    return True, ""
 
 
 def allowed_tls_domains():
@@ -363,6 +397,31 @@ class AdminHandler(_Base):
             self._json(200 if ok else 400, {"ok": ok, "errors": errors})
             return
 
+        # graph/preview — скачать подписку и вернуть её ссылки (для UI-переименования)
+        if path == "/graph/preview":
+            sess = self._session()
+            if not sess:
+                self._json(401, {"ok": False, "error": "Сессия истекла"})
+                return
+            if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), sess.get("csrf", "")):
+                self._json(403, {"ok": False, "error": "Неверный CSRF-токен"})
+                return
+            data = self._read_json()
+            url = ((data or {}).get("url") or "").strip() if isinstance(data, dict) else ""
+            ok, why = _safe_outbound_url(url)
+            if not ok:
+                self._json(400, {"ok": False, "error": why})
+                return
+            try:
+                links = subs.preview_subscription(url)
+            except urllib.error.HTTPError as e:
+                self._json(502, {"ok": False, "error": f"upstream HTTP {e.code}"})
+            except Exception as e:
+                self._json(502, {"ok": False, "error": f"upstream: {e}"})
+            else:
+                self._json(200, {"ok": True, "links": links})
+            return
+
         if not self._session():
             self._redirect("/login")
             return
@@ -528,10 +587,10 @@ class SubHandler(_Base):
             d = self._device()
             print(f"[{self.log_date_time_string()}] DEVICE ip={d['ip']} hwid={d['hwid'] or '-'} "
                   f"model={d['model'] or '-'} app={d['app'] or '-'} ua=\"{d['ua']}\"", flush=True)
-            urls = graph.resolve_links_spec(STORE, route)
+            spec = graph.resolve_links_spec(STORE, route)
             announce = route.get("announce", "")
             try:
-                body, headers = subs.build_route_response(route, urls, announce)
+                body, headers = subs.build_route_response(route, spec, announce)
             except urllib.error.HTTPError as e:
                 self._respond(502, f"upstream HTTP {e.code}".encode())
             except Exception as e:

@@ -9,6 +9,7 @@ graph.py — операции над графом подписок (маршру
 """
 
 import re
+import json
 import secrets
 
 from subscriptions import normalize_path
@@ -21,9 +22,108 @@ RESERVED_PATHS = {"/healthz"}
 
 ANNOUNCE_MAX = 8000
 
+# Схемы «прямых ключей» — готовая прокси-ссылка, которую НЕ скачивают, а вставляют
+# в выдачу как есть. Всё остальное со схемой http(s) считаем URL-подпиской.
+PROXY_SCHEMES = ("vless", "vmess", "trojan", "ss", "ssr",
+                 "hysteria2", "hysteria", "hy2", "tuic")
+
+# Капы на node_meta (защита от раздувания синкаемого конфига).
+KEYS_PER_NODE_MAX = 64
+RENAMES_PER_NODE_MAX = 512
+LINK_MAX = 2048
+NAME_MAX = 200
+NODE_META_BYTES_MAX = 256 * 1024
+
 
 def _new_id():
     return secrets.token_hex(8)
+
+
+def _scheme(url):
+    u = (url or "").strip()
+    i = u.find("://")
+    return u[:i].lower() if i > 0 else ""
+
+
+def _is_direct_link(url):
+    return _scheme(url) in PROXY_SCHEMES
+
+
+def _is_key_node(source, node_meta):
+    """Нода-ключ (прямые ссылки), а не URL-подписка. Роль выводим из данных, а не
+    только из source['type'] — чтобы потеря 'type' старым узлом не ломала поведение."""
+    sid = source.get("id")
+    meta = (node_meta or {}).get(sid) or {}
+    if isinstance(meta.get("keys"), list):
+        return True
+    if source.get("type") == "key":
+        return True
+    return _is_direct_link(source.get("url") or "")
+
+
+def _node_keys(source, node_meta):
+    """Прямые ключи ноды [{link,name}], если это нода-ключ; иначе None."""
+    sid = source.get("id")
+    meta = (node_meta or {}).get(sid) or {}
+    raw = meta.get("keys")
+    if isinstance(raw, list) and raw:
+        out = []
+        for k in raw:
+            if isinstance(k, dict) and (k.get("link") or "").strip():
+                out.append({"link": k["link"].strip(), "name": str(k.get("name") or "")})
+        if out:
+            return out
+    # легаси / авто-починка: прямая ссылка прямо в url ноды
+    url = (source.get("url") or "").strip()
+    if _is_direct_link(url):
+        return [{"link": url, "name": str(source.get("label") or "")}]
+    return None
+
+
+def _norm_name(v):
+    return str(v or "").replace("\n", " ").replace("\r", " ").strip()[:NAME_MAX]
+
+
+def _norm_node_meta(raw, id_map, valid_ids):
+    """node_meta из payload → валидный/обрезанный map по существующим id нод (GC)."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for nid_raw, meta in raw.items():
+        nid = id_map.get(str(nid_raw), str(nid_raw))
+        if nid not in valid_ids or not isinstance(meta, dict):
+            continue
+        entry = {}
+        keys = meta.get("keys")
+        if isinstance(keys, list):
+            klist = []
+            for k in keys[:KEYS_PER_NODE_MAX]:
+                if not isinstance(k, dict):
+                    continue
+                link = str(k.get("link") or "").strip()[:LINK_MAX]
+                if link:
+                    klist.append({"link": link, "name": _norm_name(k.get("name"))})
+            if klist:
+                entry["keys"] = klist
+        renames = meta.get("renames")
+        if isinstance(renames, list):
+            rlist = []
+            for r in renames[:RENAMES_PER_NODE_MAX]:
+                if not isinstance(r, dict):
+                    continue
+                to = _norm_name(r.get("to"))
+                if not to:
+                    continue
+                rlist.append({
+                    "addr": str(r.get("addr") or "").strip()[:LINK_MAX],
+                    "name": str(r.get("name") or "").strip()[:LINK_MAX],
+                    "to": to,
+                })
+            if rlist:
+                entry["renames"] = rlist
+        if entry:
+            out[nid] = entry
+    return out
 
 
 def _norm_announce(v):
@@ -75,14 +175,20 @@ def autolayout(cfg):
 
 def sync_graph_from_routes(cfg):
     _ensure_keys(cfg)
+    node_meta = cfg.get("node_meta") or {}
     old_by_url = {}
     for s in cfg.get("sources", []):
-        if s.get("url"):
+        if s.get("url") and not _is_key_node(s, node_meta):
             old_by_url.setdefault(s["url"], s)
+    # Ноды-ключи (прямые ссылки) не описываются upstreams маршрутов — сохраняем
+    # их и их рёбра как есть, иначе классический редактор стёр бы их (P0).
+    key_nodes = [dict(s) for s in cfg.get("sources", []) if _is_key_node(s, node_meta)]
+    key_ids = {s.get("id") for s in key_nodes if s.get("id")}
     route_ids = {r.get("id") for r in cfg["routes"] if r.get("id")}
-    # сохраняем рёбра маршрут→маршрут (классические формы их не описывают)
-    kept_route_edges = [e for e in cfg.get("edges", [])
-                        if e.get("from") in route_ids and e.get("to") in route_ids]
+    # сохраняем рёбра маршрут→маршрут и ключ→маршрут (их нет в upstreams)
+    kept_edges = [e for e in cfg.get("edges", [])
+                  if (e.get("from") in route_ids or e.get("from") in key_ids)
+                  and e.get("to") in route_ids]
     sources, edges, by_url = [], [], {}
     for route in cfg["routes"]:
         rid = route.get("id")
@@ -103,14 +209,17 @@ def sync_graph_from_routes(cfg):
                 sources.append(node)
                 by_url[url] = node
             edges.append({"from": node["id"], "to": rid})
-    cfg["sources"] = sources
-    cfg["edges"] = edges + kept_route_edges
+    cfg["sources"] = sources + key_nodes
+    cfg["edges"] = edges + kept_edges
     autolayout(cfg)
 
 
 def recompute_upstreams_from_graph(cfg):
     _ensure_keys(cfg)
-    url_by_id = {s.get("id"): (s.get("url") or "") for s in cfg["sources"] if s.get("id")}
+    node_meta = cfg.get("node_meta") or {}
+    # В upstreams попадают только URL-подписки (их скачивают); ноды-ключи — нет.
+    url_by_id = {s.get("id"): (s.get("url") or "")
+                 for s in cfg["sources"] if s.get("id") and not _is_key_node(s, node_meta)}
     incoming = {}
     for e in cfg["edges"]:
         incoming.setdefault(e.get("to"), []).append(e.get("from"))
@@ -141,16 +250,21 @@ def _creates_cycle(radj, fr, to):
 
 
 def resolve_links_spec(store, route):
-    """Источники маршрута транзитивно (через маршруты на входе). → список url.
-    Циклобезопасно (visited). Текст под подпиской (announce) — отдельно, на сам
-    маршрут, не собирается с входов."""
+    """Транзитивный набор для отдачи маршрута (через маршруты на входе):
+        {"subs": [{"url", "renames"}], "keys": [{"link", "name"}]}.
+    subs — URL-подписки (их скачивают), keys — прямые ключи (вставляются как есть).
+    Выключенный маршрут не отдаёт ничего (даже как вход другого). Циклобезопасно
+    (visited). Текст под подпиской (announce) — отдельно, на сам маршрут."""
     cfg = store.get_config() or {}
+    node_meta = cfg.get("node_meta") or {}
     routes_by_id = {r.get("id"): r for r in cfg.get("routes", []) if r.get("id")}
     src_by_id = {s.get("id"): s for s in cfg.get("sources", []) if s.get("id")}
     incoming = {}
     for e in cfg.get("edges", []):
         incoming.setdefault(e.get("to"), []).append(e.get("from"))
-    urls, seen, visited = [], set(), set()
+    subs, sub_by_url = [], {}
+    keys, seen_key = [], set()
+    visited = set()
     # Итеративный DFS (а не рекурсия) — глубина цепочки не упирается в лимит стека.
     stack = [route.get("id")]
     while stack:
@@ -160,26 +274,44 @@ def resolve_links_spec(store, route):
         visited.add(rid)
         r = routes_by_id.get(rid)
         if not r or not r.get("enabled", True):
-            # выключенный маршрут не отдаёт свой контент даже как вход другого
             continue
         for fid in incoming.get(rid, []):
             if fid in src_by_id:
-                u = (src_by_id[fid].get("url") or "").strip()
-                if u and u not in seen:
-                    seen.add(u)
-                    urls.append(u)
+                s = src_by_id[fid]
+                node_keys = _node_keys(s, node_meta)
+                if node_keys is not None:
+                    for k in node_keys:
+                        if k["link"] not in seen_key:
+                            seen_key.add(k["link"])
+                            keys.append(k)
+                else:
+                    url = (s.get("url") or "").strip()
+                    if url:
+                        renames = ((node_meta.get(fid) or {}).get("renames")) or []
+                        existing = sub_by_url.get(url)
+                        if existing is None:
+                            entry = {"url": url, "renames": list(renames)}
+                            subs.append(entry)
+                            sub_by_url[url] = entry
+                        else:
+                            existing["renames"].extend(renames)
             elif fid in routes_by_id:
                 stack.append(fid)
-    return urls
+    return {"subs": subs, "keys": keys}
 
 
 # ── чтение ────────────────────────────────────────────────────────────────
 def get_graph(store):
     cfg = store.get_config() or {}
+    nm = {}
+    for nid, meta in (cfg.get("node_meta") or {}).items():
+        if isinstance(meta, dict):
+            nm[nid] = {k: list(v) if isinstance(v, list) else v for k, v in meta.items()}
     return {
         "sources": [dict(s) for s in cfg.get("sources", [])],
         "routes": [dict(r) for r in cfg.get("routes", [])],
         "edges": [dict(e) for e in cfg.get("edges", [])],
+        "node_meta": nm,
     }
 
 
@@ -355,10 +487,20 @@ def save_graph(store, data):
             seen_edge.add(key)
             edges.append({"from": fr, "to": to})
 
+    # node_meta: ключи/переименования по id нод. Прогоняем id через id_map (как
+    # рёбра), оставляем только записи для существующих источников (GC), капаем.
+    node_meta = _norm_node_meta(data.get("node_meta"), id_map, src_ids)
+    if len(json.dumps(node_meta, ensure_ascii=False).encode("utf-8")) > NODE_META_BYTES_MAX:
+        return False, ["Слишком много ключей/переименований (node_meta)"]
+
     def mut(cfg):
         cfg["sources"] = sources
         cfg["routes"] = routes
         cfg["edges"] = edges
+        # пишем node_meta, только если есть данные или он уже был (чтобы не плодить
+        # лишний bump версии на конфигах без ключей/переименований)
+        if node_meta or cfg.get("node_meta"):
+            cfg["node_meta"] = node_meta
         recompute_upstreams_from_graph(cfg)
     store.update_config(mut)
     return True, []

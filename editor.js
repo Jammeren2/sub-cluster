@@ -3,7 +3,7 @@
   const ADMIN = (typeof window.__ADMIN__ === 'string') ? window.__ADMIN__ : '/admin';
   const CSRF = window.__CSRF__ || '';
   const BASE = window.__BASE__ || '';
-  G.sources = G.sources || []; G.routes = G.routes || []; G.edges = G.edges || [];
+  G.sources = G.sources || []; G.routes = G.routes || []; G.edges = G.edges || []; G.node_meta = G.node_meta || {};
 
   const NODE_W = 240, SOCK_Y = 28;
   const editor = document.getElementById('editor');
@@ -24,6 +24,17 @@
   function normPath(p){ p=(p||'').trim().replace(/^\/+|\/+$/g,''); return p?('/'+p):'/'; }
   function findAny(id){ return G.sources.find(x=>x.id===id) || G.routes.find(x=>x.id===id); }
   function isRoute(n){ return G.routes.indexOf(n)>=0; }
+  function isDirectLink(u){ return /^(vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic):\/\//i.test((u||'').trim()); }
+
+  // Гидрация ключей/переименований из node_meta (роль ноды выводим из данных, не только из type)
+  G.sources.forEach(s=>{
+    const meta = G.node_meta[s.id] || {};
+    if(Array.isArray(meta.keys)){ s.type='key'; s.keys = meta.keys.map(k=>({link:k.link||'', name:k.name||''})); }
+    else if(s.type==='key'){ s.keys = s.keys||[]; }
+    else if(isDirectLink(s.url)){ s.type='key'; s.keys=[{link:s.url, name:s.label||''}]; s.url=''; }  // легаси прямой ключ
+    if(Array.isArray(meta.renames)) s.renames = meta.renames.map(r=>({addr:r.addr||'', name:r.name||'', to:r.to||''}));
+    s.keys = s.keys||[]; s.renames = s.renames||[];
+  });
 
   // auto-position nodes missing coords
   let sy=60; G.sources.forEach(s=>{ s.x=num(s.x,80); if(!isFinite(parseFloat(s.y))){ s.y=sy; sy+=130; } else { s.y=num(s.y,sy); } });
@@ -134,23 +145,77 @@
     const lab=el('input'); lab.value=s.label||''; lab.placeholder='необязательно'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
     bd.appendChild(el('label',null,'Ссылка-подписка (upstream)'));
     const url=el('input','mono'); url.value=s.url||''; url.placeholder='https://сервер/sub/xxxx'; mask(url); url.addEventListener('input',()=>{ s.url=url.value; markDirty(); }); bd.appendChild(url);
+    // переименование отдельных ссылок внутри подписки
+    const det=el('details'); det.appendChild(el('summary',null,'Переименовать ссылки'));
+    const box=el('div','linkbox');
+    const btn=el('button','loadlinks', (s.renames&&s.renames.length)?'Обновить ссылки':'Загрузить ссылки'); btn.type='button';
+    btn.addEventListener('mousedown',e=>e.stopPropagation());
+    btn.addEventListener('click',e=>{ e.stopPropagation(); loadLinks(s,box,btn); });
+    det.appendChild(btn); det.appendChild(box); bd.appendChild(det);
     n.appendChild(bd);
     dragHeader(hd,s,n); deleteBtn(x,s); n.appendChild(outSocket(s));
     nodeEls[s.id]=n; world.appendChild(n);
   }
 
   function makeKey(s){
-    s.type = 'key';
+    s.type='key'; s.keys=s.keys||[]; if(!s.keys.length) s.keys.push({link:'',name:''});
     const n=el('div','node key'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
-    const hd=el('div','hd'); hd.appendChild(el('span',null,'Ключ')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
+    const hd=el('div','hd'); hd.appendChild(el('span',null,'Ключи')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
     const bd=el('div','bd');
-    bd.appendChild(el('label',null,'Название ключа'));
-    const lab=el('input'); lab.value=s.label||''; lab.placeholder='необязательно'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
-    bd.appendChild(el('label',null,'Ссылка-ключ (upstream)'));
-    const url=el('input','mono'); url.value=s.url||''; url.placeholder='https://сервер/sub/xxxx'; mask(url); url.addEventListener('input',()=>{ s.url=url.value; markDirty(); }); bd.appendChild(url);
+    bd.appendChild(el('label',null,'Прямые ссылки (vless://… и т.п.) и их имена'));
+    const list=el('div','keylist'); bd.appendChild(list);
+    function addRow(k){
+      const row=el('div','keyrow');
+      const link=el('input','mono'); link.value=k.link||''; link.placeholder='vless://…'; mask(link);
+      link.addEventListener('input',()=>{ k.link=link.value; markDirty(); });
+      const r2=el('div','krow2');
+      const nm=el('input','kname'); nm.value=k.name||''; nm.placeholder='имя (необязательно)';
+      nm.addEventListener('input',()=>{ k.name=nm.value; markDirty(); });
+      const rm=el('span','krm','✕'); rm.title='Удалить ключ';
+      rm.addEventListener('mousedown',e=>e.stopPropagation());
+      rm.addEventListener('click',e=>{ e.stopPropagation(); const i=s.keys.indexOf(k); if(i>=0)s.keys.splice(i,1); row.remove();
+        if(!s.keys.length){ const nk={link:'',name:''}; s.keys.push(nk); addRow(nk); } markDirty(); });
+      r2.appendChild(nm); r2.appendChild(rm); row.appendChild(link); row.appendChild(r2); list.appendChild(row);
+    }
+    s.keys.forEach(addRow);
+    const add=el('button','addkey','+ ключ'); add.type='button'; add.addEventListener('mousedown',e=>e.stopPropagation());
+    add.addEventListener('click',e=>{ e.stopPropagation(); const k={link:'',name:''}; s.keys.push(k); addRow(k); markDirty(); });
+    bd.appendChild(add);
     n.appendChild(bd);
     dragHeader(hd,s,n); deleteBtn(x,s); n.appendChild(outSocket(s));
     nodeEls[s.id]=n; world.appendChild(n);
+  }
+
+  // ── переименование ссылок внутри подписки ──
+  function getRename(s,addr,name){ const r=(s.renames||[]).find(r=>r.addr===addr && r.name===name); return r?r.to:''; }
+  function setRename(s,addr,name,to){
+    s.renames=s.renames||[]; to=(to||'').trim();
+    const i=s.renames.findIndex(r=>r.addr===addr && r.name===name);
+    if(!to){ if(i>=0)s.renames.splice(i,1); }
+    else if(i>=0){ s.renames[i].to=to; }
+    else { s.renames.push({addr:addr,name:name,to:to}); }
+  }
+  function renderRenameRows(s,box,links){
+    box.textContent='';
+    if(!links.length){ box.appendChild(el('div','muted2','Ссылок не найдено')); return; }
+    links.forEach(l=>{
+      const addr=l.addr||'', name=l.name||'';
+      const row=el('div','renrow');
+      const orig=el('div','origname'); orig.textContent=(name||'(без имени)')+(addr?(' · '+addr):''); orig.title=l.link||'';
+      const inp=el('input','rni'); inp.placeholder='новое имя'; inp.value=getRename(s,addr,name);
+      inp.addEventListener('input',()=>{ setRename(s,addr,name,inp.value); markDirty(); });
+      row.appendChild(orig); row.appendChild(inp); box.appendChild(row);
+    });
+  }
+  function loadLinks(s,box,btn){
+    if(!(s.url||'').trim()){ showToast('Сначала укажи ссылку-подписку',true); return; }
+    btn.disabled=true; const prev=btn.textContent; btn.textContent='Загрузка…';
+    fetch(ADMIN+'/graph/preview',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify({url:s.url})})
+      .then(r=>r.json().then(j=>({ok:r.ok,j})))
+      .then(({ok,j})=>{ btn.disabled=false; btn.textContent='Обновить ссылки';
+        if(!j||!j.ok){ btn.textContent=prev; showToast('Не удалось: '+((j&&j.error)||'ошибка'),true); return; }
+        renderRenameRows(s,box,j.links||[]); })
+      .catch(()=>{ btn.disabled=false; btn.textContent=prev; showToast('Сервер недоступен',true); });
   }
 
   function makeRoute(r){
@@ -202,7 +267,7 @@
 
   function centerWorld(){ const r=rect(); return {x:(r.width/2-view.panX)/view.zoom, y:(r.height/2-view.panY)/view.zoom}; }
   document.getElementById('addSrc').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'source',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeSource(s); redrawWires(); markDirty(); });
-  document.getElementById('addKey').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'key',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeKey(s); redrawWires(); markDirty(); });
+  document.getElementById('addKey').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'key',keys:[{link:'',name:''}],renames:[],x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeKey(s); redrawWires(); markDirty(); });
   document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
   document.getElementById('save').addEventListener('click',()=>save(false));
@@ -221,10 +286,23 @@
     if(saving){ pendingSave=true; pendingSilent=pendingSilent&&silent; return; }
     pendingSave=false; pendingSilent=true;
     saving=true; setStat('… сохранение','dirty');
+    const node_meta={};
+    G.sources.forEach(s=>{
+      const e={};
+      if(s.type==='key'){
+        const keys=(s.keys||[]).filter(k=>(k.link||'').trim()).map(k=>({link:k.link.trim(),name:k.name||''}));
+        if(keys.length) e.keys=keys;
+      } else {
+        const ren=(s.renames||[]).filter(r=>(r.to||'').trim()).map(r=>({addr:r.addr||'',name:r.name||'',to:r.to}));
+        if(ren.length) e.renames=ren;
+      }
+      if(Object.keys(e).length) node_meta[s.id]=e;
+    });
     const payload={
       sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',type:s.type||'source',x:Math.round(s.x),y:Math.round(s.y)})),
       routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,announce:r.announce||'',x:Math.round(r.x),y:Math.round(r.y)})),
-      edges:G.edges.map(e=>({from:e.from,to:e.to}))
+      edges:G.edges.map(e=>({from:e.from,to:e.to})),
+      node_meta:node_meta
     };
     fetch(ADMIN+'/graph/save',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify(payload)})
       .then(r=>r.json().then(j=>({ok:r.ok,j})))
@@ -239,6 +317,6 @@
   }
 
   applyTransform();
-  G.sources.forEach(s=>{ if(s.type==='key') makeKey(s); else makeSource(s); }); G.routes.forEach(makeRoute);
+  G.sources.forEach(s=>{ if(s.type==='key' || (s.keys&&s.keys.length)) makeKey(s); else makeSource(s); }); G.routes.forEach(makeRoute);
   redrawWires(); refreshCounts(); setStat('', '');
 })();
