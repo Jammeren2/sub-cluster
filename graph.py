@@ -242,7 +242,29 @@ def _node_group(source, node_meta):
     return g if isinstance(g, dict) else {"buckets": [], "params": {}}
 
 
-# _is_key_node/_node_keys уже возвращают False/None для группы (нет meta["keys"],
+def _is_autoselect_node(source, node_meta):
+    """Нода авто-выбора (все входы → один балансер leastPing, roadmap/03A)."""
+    sid = source.get("id")
+    meta = (node_meta or {}).get(sid) or {}
+    if isinstance(meta.get("autoselect"), dict):
+        return True
+    return source.get("type") == "autoselect"
+
+
+def _node_autoselect(source, node_meta):
+    """Конфиг авто-выбора {params}, если это нода авто-выбора; иначе None."""
+    if not _is_autoselect_node(source, node_meta):
+        return None
+    a = ((node_meta or {}).get(source.get("id")) or {}).get("autoselect")
+    return a if isinstance(a, dict) else {"params": {}}
+
+
+def _is_proc_node(source, node_meta):
+    """Обрабатывающая нода (группа ИЛИ авто-выбор): берёт source/key, отдаёт в маршрут."""
+    return _is_group_node(source, node_meta) or _is_autoselect_node(source, node_meta)
+
+
+# _is_key_node/_node_keys уже возвращают False/None для группы/авто (нет meta["keys"],
 # type != "key", url == "") — отдельная проверка не нужна.
 
 
@@ -311,6 +333,9 @@ def _norm_node_meta(raw, id_map, valid_ids):
             if buckets:
                 entry["group"] = {"buckets": buckets,
                                   "params": subs._norm_balancer_params(grp.get("params"))}
+        auto = meta.get("autoselect")
+        if isinstance(auto, dict):
+            entry["autoselect"] = {"params": subs._norm_balancer_params(auto.get("params"))}
         if entry:
             out[nid] = entry
     return out
@@ -368,23 +393,23 @@ def sync_graph_from_routes(cfg):
     node_meta = cfg.get("node_meta") or {}
     old_by_url = {}
     for s in cfg.get("sources", []):
-        if s.get("url") and not _is_key_node(s, node_meta) and not _is_group_node(s, node_meta):
+        if s.get("url") and not _is_key_node(s, node_meta) and not _is_proc_node(s, node_meta):
             old_by_url.setdefault(s["url"], s)
-    # Сохраняем как есть: ноды-ключи, ноды-группы и любой источник, питающий группу
-    # (URL-подписка, питающая ТОЛЬКО группу, не появится в upstreams маршрута — иначе
-    # классический редактор стёр бы её и её рёбра, P0).
-    group_ids = {s.get("id") for s in cfg.get("sources", [])
-                 if _is_group_node(s, node_meta) and s.get("id")}
-    feeds_group = {e.get("from") for e in cfg.get("edges", []) if e.get("to") in group_ids}
+    # Сохраняем как есть: ноды-ключи, обрабатывающие ноды (группа/авто) и любой источник,
+    # питающий такую ноду (URL-подписка, питающая ТОЛЬКО proc, не появится в upstreams
+    # маршрута — иначе классический редактор стёр бы её и её рёбра, P0).
+    proc_ids = {s.get("id") for s in cfg.get("sources", [])
+                if _is_proc_node(s, node_meta) and s.get("id")}
+    feeds_proc = {e.get("from") for e in cfg.get("edges", []) if e.get("to") in proc_ids}
     carry = [dict(s) for s in cfg.get("sources", [])
-             if _is_key_node(s, node_meta) or _is_group_node(s, node_meta)
-             or s.get("id") in feeds_group]
+             if _is_key_node(s, node_meta) or _is_proc_node(s, node_meta)
+             or s.get("id") in feeds_proc]
     carry_ids = {s.get("id") for s in carry if s.get("id")}
     route_ids = {r.get("id") for r in cfg["routes"] if r.get("id")}
-    # рёбра вне upstreams: (маршрут/ключ/группа/источник-в-группу)→маршрут и любое *→группа
+    # рёбра вне upstreams: (маршрут/ключ/proc/источник-в-proc)→маршрут и любое *→proc
     kept_edges = [e for e in cfg.get("edges", [])
                   if ((e.get("from") in route_ids or e.get("from") in carry_ids) and e.get("to") in route_ids)
-                  or (e.get("to") in group_ids)]
+                  or (e.get("to") in proc_ids)]
     sources, edges, by_url = [], [], {}
     for route in cfg["routes"]:
         rid = route.get("id")
@@ -419,11 +444,11 @@ def sync_graph_from_routes(cfg):
 def recompute_upstreams_from_graph(cfg):
     _ensure_keys(cfg)
     node_meta = cfg.get("node_meta") or {}
-    # В upstreams попадают только URL-подписки (их скачивают); ноды-ключи и группы — нет
-    # (группа резолвится при отдаче через spec["groups"], её ребро group→route — без url).
+    # В upstreams попадают только URL-подписки (их скачивают); ключи и proc-ноды — нет
+    # (группа/авто резолвятся при отдаче через spec["groups"], их ребро proc→route — без url).
     url_by_id = {s.get("id"): (s.get("url") or "")
                  for s in cfg["sources"]
-                 if s.get("id") and not _is_key_node(s, node_meta) and not _is_group_node(s, node_meta)}
+                 if s.get("id") and not _is_key_node(s, node_meta) and not _is_proc_node(s, node_meta)}
     incoming = {}
     for e in cfg["edges"]:
         incoming.setdefault(e.get("to"), []).append(e.get("from"))
@@ -483,10 +508,10 @@ def resolve_links_spec(store, route):
         for fid in incoming.get(rid, []):
             if fid in src_by_id:
                 s = src_by_id[fid]
-                if _is_group_node(s, node_meta):
-                    if fid not in seen_groups:    # группа на входе двух маршрутов — резолвим раз
+                if _is_proc_node(s, node_meta):
+                    if fid not in seen_groups:    # proc-нода на входе двух маршрутов — резолвим раз
                         seen_groups.add(fid)
-                        groups.append(_resolve_group(s, node_meta, incoming, src_by_id))
+                        groups.append(_resolve_proc(s, node_meta, incoming, src_by_id))
                     continue
                 node_keys = _node_keys(s, node_meta)
                 if node_keys is not None:
@@ -510,16 +535,16 @@ def resolve_links_spec(store, route):
     return {"subs": subs, "keys": keys, "groups": groups}
 
 
-def _resolve_group(group_node, node_meta, incoming, src_by_id):
-    """Вход группы — всегда source/key (рёбра гарантирует save_graph), поэтому без
-    рекурсии/циклов: собираем подписки и прямые ключи, питающие группу, + её корзины."""
-    gdef = _node_group(group_node, node_meta) or {}
+def _resolve_proc(proc_node, node_meta, incoming, src_by_id):
+    """Вход группы/авто-выбора — всегда source/key (рёбра гарантирует save_graph), поэтому
+    без рекурсии/циклов: собираем подписки и прямые ключи, питающие ноду. Авто-выбор →
+    {auto:True, без корзин}; группа → {buckets}."""
     g_subs, g_keys, seen_k = [], [], set()
     g_sub_by_url = {}
-    for fid in incoming.get(group_node.get("id"), []):
+    for fid in incoming.get(proc_node.get("id"), []):
         s = src_by_id.get(fid)
-        if s is None or _is_group_node(s, node_meta):
-            continue  # вложенные группы не поддерживаем
+        if s is None or _is_proc_node(s, node_meta):
+            continue  # вложенные proc-ноды не поддерживаем
         nk = _node_keys(s, node_meta)
         if nk is not None:
             for k in nk:
@@ -537,10 +562,13 @@ def _resolve_group(group_node, node_meta, incoming, src_by_id):
                     g_sub_by_url[url] = entry
                 else:
                     ex["renames"].extend(renames)
-    return {"name": group_node.get("label") or "",
-            "params": gdef.get("params") or {},
-            "buckets": gdef.get("buckets") or [],
-            "subs": g_subs, "keys": g_keys}
+    if _is_autoselect_node(proc_node, node_meta):
+        params = (_node_autoselect(proc_node, node_meta) or {}).get("params") or {}
+        return {"name": proc_node.get("label") or "", "params": params,
+                "auto": True, "buckets": [], "subs": g_subs, "keys": g_keys}
+    gdef = _node_group(proc_node, node_meta) or {}
+    return {"name": proc_node.get("label") or "", "params": gdef.get("params") or {},
+            "buckets": gdef.get("buckets") or [], "subs": g_subs, "keys": g_keys}
 
 
 # ── чтение ────────────────────────────────────────────────────────────────
@@ -717,7 +745,7 @@ def save_graph(store, data):
             "id": sid,
             "url": str(s.get("url") or "").strip()[:2048],
             "label": str(s.get("label") or "").strip()[:120],
-            "type": str(s.get("type") or "source") if str(s.get("type") or "") in ("source", "key", "group") else "source",
+            "type": str(s.get("type") or "source") if str(s.get("type") or "") in ("source", "key", "group", "autoselect") else "source",
             "x": _num(s.get("x"), 80.0), "y": _num(s.get("y"), 80.0),
         })
 
@@ -762,12 +790,13 @@ def save_graph(store, data):
     if errors:
         return False, errors
 
-    # Рёбра. to = маршрут ИЛИ группа. Разрешено: source/key→group, source/key→route,
-    # group→route, route→route. Запрещено: group→group, route→group, самопетли, циклы.
-    group_ids = {s["id"] for s in sources if s["type"] == "group"}
-    plain_src_ids = src_ids - group_ids
+    # Рёбра. Обрабатывающие ноды (группа/авто-выбор) берут только source/key и отдают
+    # в маршрут. Разрешено: source/key→proc, source/key→route, proc→route, route→route.
+    # Запрещено: proc→proc, route→proc, самопетли, циклы.
+    proc_ids = {s["id"] for s in sources if s["type"] in ("group", "autoselect")}
+    plain_src_ids = src_ids - proc_ids
     edges, seen_edge = [], set()
-    radj = {}  # обрабатывающая нода (группа/маршрут) -> входы, для проверки циклов
+    radj = {}  # обрабатывающая нода (proc/маршрут) -> входы, для проверки циклов
     for e in raw_edges:
         if not isinstance(e, dict):
             continue
@@ -777,11 +806,11 @@ def save_graph(store, data):
         if fr == to or key in seen_edge:
             continue
         to_route = to in route_ids
-        to_group = to in group_ids
-        if not (to_route or to_group):
+        to_proc = to in proc_ids
+        if not (to_route or to_proc):
             continue
-        if to_group:
-            # в группу можно только из источника/ключа (не group→group, не route→group)
+        if to_proc:
+            # в группу/авто можно только из источника/ключа (не proc→proc, не route→proc)
             if fr in plain_src_ids:
                 seen_edge.add(key)
                 edges.append({"from": fr, "to": to})
@@ -790,7 +819,7 @@ def save_graph(store, data):
         if fr in plain_src_ids:                                   # source/key → route
             seen_edge.add(key)
             edges.append({"from": fr, "to": to})
-        elif fr in group_ids and not _creates_cycle(radj, fr, to):  # group → route
+        elif fr in proc_ids and not _creates_cycle(radj, fr, to):   # group/auto → route
             radj.setdefault(to, []).append(fr)
             seen_edge.add(key)
             edges.append({"from": fr, "to": to})

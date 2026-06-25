@@ -31,6 +31,8 @@
   function findAny(id){ return G.sources.find(x=>x.id===id) || G.routes.find(x=>x.id===id); }
   function isRoute(n){ return G.routes.indexOf(n)>=0; }
   function isGroup(n){ return !!(n && n.type==='group'); }
+  function isAuto(n){ return !!(n && n.type==='autoselect'); }
+  function isProc(n){ return isGroup(n) || isAuto(n); }
   function isDirectLink(u){ return /^(vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic):\/\//i.test((u||'').trim()); }
   const BAL_DEFAULTS = window.__BAL_DEFAULTS__ || {strategy:'leastPing',probe_url:'http://www.gstatic.com/generate_204',interval:'5m',timeout:'3s',sampling:2,domain_strategy:'AsIs'};
   const _DEF_PORTS = {vless:443,trojan:443,tuic:443,hysteria2:443,hy2:443,hysteria:443};
@@ -39,6 +41,12 @@
   // Гидрация ключей/групп/переименований из node_meta (роль ноды выводим из данных, не только из type)
   G.sources.forEach(s=>{
     const meta = G.node_meta[s.id] || {};
+    if(meta.autoselect || s.type==='autoselect'){
+      s.type='autoselect';
+      s.gparams = Object.assign({}, (meta.autoselect&&meta.autoselect.params)||{});
+      s.gparams = s.gparams||{};
+      return;  // авто-выбор не гидрируется как ключ/источник
+    }
     if(meta.group || s.type==='group'){
       s.type='group';
       s.buckets = ((meta.group&&meta.group.buckets)||[]).map(b=>({name:b.name||'',
@@ -139,9 +147,9 @@
     if(target){
       const f=connecting.from, t=target.id, fromNode=findAny(f);
       if(f!==t && !G.edges.some(e=>e.from===f && e.to===t)){
-        if(isGroup(target)){
-          // в группу можно тянуть только из источника/ключа
-          if(isGroup(fromNode) || isRoute(fromNode)) showToast('В группу — только из источника/ключа',true);
+        if(isProc(target)){
+          // в группу/авто-выбор можно тянуть только из источника/ключа
+          if(isProc(fromNode) || isRoute(fromNode)) showToast('В группу/авто-выбор — только из источника/ключа',true);
           else { G.edges.push({from:f,to:t}); markDirty(); }
         } else if(isRoute(fromNode) && wouldCycle(f,t)){ showToast('Нельзя замкнуть цикл маршрутов',true); }
         else { G.edges.push({from:f,to:t}); markDirty(); }
@@ -208,6 +216,24 @@
     nodeEls[s.id]=n; world.appendChild(n);
   }
 
+  // ── балансер: общий блок параметров (группа и авто-выбор) ──
+  function balancerParamsDetails(s){
+    s.gparams=s.gparams||{};
+    const pdet=el('details'); pdet.appendChild(el('summary',null,'Параметры балансера'));
+    const pbox=el('div','bparams');
+    function pfield(label,key,ph){ const w=el('div'); w.appendChild(el('label',null,label));
+      const inp=el('input'); inp.value=(s.gparams[key]!=null?s.gparams[key]:(BAL_DEFAULTS[key]!=null?BAL_DEFAULTS[key]:'')); inp.placeholder=ph||'';
+      inp.addEventListener('input',()=>{ s.gparams[key]=inp.value; markDirty(); }); w.appendChild(inp); return w; }
+    function psel(label,key,opts){ const w=el('div'); w.appendChild(el('label',null,label)); const sel=el('select');
+      opts.forEach(o=>{ const op=el('option',null,o); op.value=o; if((s.gparams[key]||BAL_DEFAULTS[key])===o)op.selected=true; sel.appendChild(op); });
+      sel.addEventListener('change',()=>{ s.gparams[key]=sel.value; markDirty(); }); w.appendChild(sel); return w; }
+    pbox.appendChild(psel('Стратегия','strategy',['leastPing','leastLoad','random','roundRobin']));
+    pbox.appendChild(pfield('Probe URL','probe_url','http://www.gstatic.com/generate_204'));
+    const grow=el('div','grow2'); grow.appendChild(pfield('Интервал','interval','5m')); grow.appendChild(pfield('Таймаут','timeout','3s')); pbox.appendChild(grow);
+    const grow2=el('div','grow2'); grow2.appendChild(pfield('Sampling','sampling','2')); grow2.appendChild(psel('domainStrategy','domain_strategy',['AsIs','IPIfNonMatch','IPOnDemand'])); pbox.appendChild(grow2);
+    pdet.appendChild(pbox); return pdet;
+  }
+
   // ── нода-группа (страна → балансер) ──
   function memberMatchesRow(m,row){ return m.link ? (m.link===row.link) : (m.addr===row.addr && m.name===row.name); }
   function rowToMember(row){ return row.key ? {link:row.link} : {addr:row.addr, name:row.name}; }
@@ -272,20 +298,7 @@
     bd.appendChild(el('label',null,'Метка / флаг группы (видна в клиенте)'));
     const lab=el('input'); lab.value=s.label||''; lab.placeholder='🇩🇪 Германия'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
 
-    // параметры балансера
-    const pdet=el('details'); pdet.appendChild(el('summary',null,'Параметры балансера'));
-    const pbox=el('div','bparams');
-    function pfield(label,key,ph){ const w=el('div'); w.appendChild(el('label',null,label));
-      const inp=el('input'); inp.value=(s.gparams[key]!=null?s.gparams[key]:(BAL_DEFAULTS[key]!=null?BAL_DEFAULTS[key]:'')); inp.placeholder=ph||'';
-      inp.addEventListener('input',()=>{ s.gparams[key]=inp.value; markDirty(); }); w.appendChild(inp); return w; }
-    function psel(label,key,opts){ const w=el('div'); w.appendChild(el('label',null,label)); const sel=el('select');
-      opts.forEach(o=>{ const op=el('option',null,o); op.value=o; if((s.gparams[key]||BAL_DEFAULTS[key])===o)op.selected=true; sel.appendChild(op); });
-      sel.addEventListener('change',()=>{ s.gparams[key]=sel.value; markDirty(); }); w.appendChild(sel); return w; }
-    pbox.appendChild(psel('Стратегия','strategy',['leastPing','leastLoad','random','roundRobin']));
-    pbox.appendChild(pfield('Probe URL','probe_url','http://www.gstatic.com/generate_204'));
-    const grow=el('div','grow2'); grow.appendChild(pfield('Интервал','interval','5m')); grow.appendChild(pfield('Таймаут','timeout','3s')); pbox.appendChild(grow);
-    const grow2=el('div','grow2'); grow2.appendChild(pfield('Sampling','sampling','2')); grow2.appendChild(psel('domainStrategy','domain_strategy',['AsIs','IPIfNonMatch','IPOnDemand'])); pbox.appendChild(grow2);
-    pdet.appendChild(pbox); bd.appendChild(pdet);
+    bd.appendChild(balancerParamsDetails(s));   // параметры балансера
 
     // корзины + распределение входящих ссылок
     let glRows = null;
@@ -309,6 +322,23 @@
     n.appendChild(inSocket(s)); n.appendChild(outSocket(s));
     nodeEls[s.id]=n; world.appendChild(n);
     renderBuckets();
+  }
+
+  // ── нода авто-выбора (все входы → один балансер leastPing, roadmap/03A) ──
+  function makeAuto(s){
+    s.type='autoselect'; s.gparams=s.gparams||{};
+    const n=el('div','node autoselect'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
+    const hd=el('div','hd'); hd.appendChild(el('span',null,'Авто-выбор')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
+    const bd=el('div','bd');
+    bd.appendChild(el('label',null,'Метка / имя записи (видна в клиенте)'));
+    const lab=el('input'); lab.value=s.label||''; lab.placeholder='⚡ Авто (быстрейший)'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
+    const info=el('div','muted2'); info.textContent='Все входящие ключи/ссылки → одна запись с балансером по пингу (клиент сам выберет быстрейший).'; bd.appendChild(info);
+    bd.appendChild(balancerParamsDetails(s));
+    const cnt=el('div','cnt'); cnt.dataset.rid=s.id; bd.appendChild(cnt);
+    n.appendChild(bd);
+    dragHeader(hd,s,n); deleteBtn(x,s);
+    n.appendChild(inSocket(s)); n.appendChild(outSocket(s));
+    nodeEls[s.id]=n; world.appendChild(n);
   }
 
   // ── переименование ссылок внутри подписки ──
@@ -407,6 +437,8 @@
   document.getElementById('addKey').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'key',keys:[{link:'',name:''}],renames:[],x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeKey(s); redrawWires(); markDirty(); });
   const addGroupBtn=document.getElementById('addGroup');
   if(addGroupBtn) addGroupBtn.addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),type:'group',url:'',label:'',buckets:[],gparams:{},x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeGroup(s); redrawWires(); refreshCounts(); markDirty(); });
+  const addAutoBtn=document.getElementById('addAuto');
+  if(addAutoBtn) addAutoBtn.addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),type:'autoselect',url:'',label:'',gparams:{},x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeAuto(s); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',domain_id:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
   document.getElementById('save').addEventListener('click',()=>save(false));
@@ -428,7 +460,12 @@
     const node_meta={};
     G.sources.forEach(s=>{
       const e={};
-      if(s.type==='group'){
+      if(s.type==='autoselect'){
+        const params={};
+        ['strategy','probe_url','interval','timeout','sampling','domain_strategy'].forEach(k=>{
+          if(s.gparams && s.gparams[k]!=null && s.gparams[k]!=='') params[k]=s.gparams[k]; });
+        e.autoselect={params:params};   // авто-выбор: всегда пишем (узнаётся по meta/type)
+      } else if(s.type==='group'){
         // как на сервере (_norm_node_meta): держим корзину, если есть имя ИЛИ члены,
         // иначе непоименованная, но заполненная корзина молча терялась бы.
         const buckets=(s.buckets||[]).filter(b=>(b.name||'').trim() || (b.members||[]).length).map(b=>({
@@ -468,7 +505,8 @@
 
   applyTransform();
   G.sources.forEach(s=>{
-    if(s.type==='group' || (G.node_meta[s.id]||{}).group) makeGroup(s);
+    if(s.type==='autoselect' || (G.node_meta[s.id]||{}).autoselect) makeAuto(s);
+    else if(s.type==='group' || (G.node_meta[s.id]||{}).group) makeGroup(s);
     else if(s.type==='key' || (s.keys&&s.keys.length)) makeKey(s);
     else makeSource(s);
   });

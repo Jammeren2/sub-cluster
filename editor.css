@@ -95,8 +95,9 @@ body.unblur .blur{filter:none;cursor:auto}
 .addkey:hover,.loadlinks:hover{background:#3c3d45}
 .loadlinks:disabled{opacity:.6;cursor:default}
 
-/* ноды-группы (страна → балансер) */
+/* ноды-группы (страна → балансер) и авто-выбор (все входы → один балансер) */
 .node.group .hd{background:linear-gradient(180deg,#3a6ea5,#2c5680)}
+.node.autoselect .hd{background:linear-gradient(180deg,#3f8f6a,#2c6f54)}
 .bucket{display:flex;flex-direction:column;gap:5px;background:#242427;border:1px solid #34343a;
   border-radius:6px;padding:6px;margin-top:6px}
 .bucket.dragover{border-color:#4fb3a6;background:#1f2a29}

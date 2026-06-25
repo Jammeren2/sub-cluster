@@ -934,6 +934,99 @@ def t_group_resolve_dedup():
           "total=1000" in (h.get("Subscription-Userinfo") or ""), h.get("Subscription-Userinfo"))
 
 
+# ── нода авто-выбора (все входы → один балансер leastPing, roadmap/03A) ────
+def t_autoselect_emit():
+    print("\n[40] авто-выбор: все входы → один балансер")
+    route = {"id": "r", "mode": "merge"}
+    spec = {"subs": [], "keys": [], "groups": [{
+        "name": "⚡ Авто", "params": {"strategy": "leastPing"}, "auto": True, "buckets": [],
+        "subs": [{"url": "https://de/sub", "renames": []}], "keys": []}]}
+    payload, h = subs.build_merged_response(route, spec)
+    check("Content-Type JSON", "application/json" in h.get("Content-Type", ""))
+    cfgs = json.loads(payload.decode())
+    check("один конфиг", len(cfgs) == 1, len(cfgs))
+    c = cfgs[0]
+    check("remarks = метка авто", c.get("remarks") == "⚡ Авто", c.get("remarks"))
+    members = [o for o in c["outbounds"] if str(o.get("tag", "")).startswith("proxy-")]
+    check("оба входа в балансере (DE-1, DE-2)", len(members) == 2, len(members))
+    check("balancer leastPing", c["routing"]["balancers"][0]["strategy"]["type"] == "leastPing")
+
+
+def t_autoselect_nonconvertible():
+    print("\n[41] авто-выбор: hysteria2 не в балансере, отдаётся отдельно (passthrough)")
+    route = {"id": "r", "mode": "merge"}
+    spec = {"subs": [], "keys": [], "groups": [{
+        "name": "Auto", "params": {}, "auto": True, "buckets": [],
+        "subs": [{"url": "https://mix/sub", "renames": []}], "keys": []}]}
+    payload, h = subs.build_merged_response(route, spec)
+    cfgs = json.loads(payload.decode())
+    bal = next((c for c in cfgs if c.get("remarks") == "Auto"), None)
+    members = [o for o in (bal or {}).get("outbounds", []) if str(o.get("tag", "")).startswith("proxy-")]
+    check("в балансере 2 члена (vless+ss)", len(members) == 2, len(members))
+    check("hysteria2 не в выдаче (JSON форсирован)", "hysteria2" not in payload.decode())
+
+
+def t_autoselect_resolve_save():
+    print("\n[42] авто-выбор: resolve + save_graph carry + classic не стирает")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "s1bbbbbb", "type": "source", "url": "https://de/sub"},
+            {"id": "a1aaaaaa", "type": "autoselect", "url": "", "label": "⚡ Авто"}],
+        "routes": [{"id": "r1cccccc", "path": "/auto", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "s1bbbbbb", "to": "a1aaaaaa"}, {"from": "a1aaaaaa", "to": "r1cccccc"}],
+        "node_meta": {"a1aaaaaa": {"autoselect": {"params": {"strategy": "leastPing"}}}},
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    cfg = st.get_config()
+    a = next((s for s in cfg["sources"] if s["id"] == "a1aaaaaa"), None)
+    check("нода авто сохранена type=autoselect", a and a.get("type") == "autoselect", a)
+    check("node_meta.autoselect.params целы",
+          cfg["node_meta"]["a1aaaaaa"]["autoselect"]["params"].get("strategy") == "leastPing")
+    spec = graph.resolve_links_spec(st, get_route(st, "r1cccccc"))
+    check("spec содержит auto-группу",
+          len(spec.get("groups", [])) == 1 and spec["groups"][0].get("auto") is True, spec.get("groups"))
+    check("подписка авто — de/sub", any(su["url"] == "https://de/sub" for su in spec["groups"][0]["subs"]))
+    payload, h = subs.build_route_response(get_route(st, "r1cccccc"), spec)
+    check("отдача — JSON с балансером", "application/json" in h.get("Content-Type", "")
+          and any(c.get("remarks") == "⚡ Авто" for c in json.loads(payload.decode())))
+    graph.add_route(st, "/x", "X", ["https://text/sub"], "merge")   # classic-путь
+    cfg2 = st.get_config()
+    sids = {s["id"] for s in cfg2["sources"]}
+    check("авто-нода и её источник живы после add_route", "a1aaaaaa" in sids and "s1bbbbbb" in sids)
+    check("рёбра авто живы после add_route",
+          any(e["from"] == "s1bbbbbb" and e["to"] == "a1aaaaaa" for e in cfg2["edges"])
+          and any(e["from"] == "a1aaaaaa" and e["to"] == "r1cccccc" for e in cfg2["edges"]))
+
+
+def t_autoselect_edges():
+    print("\n[43] авто-выбор: запрещённые рёбра отбрасываются (proc→proc, route→proc)")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "a1aaaaaa", "type": "autoselect", "url": "", "label": "A"},
+            {"id": "a2bbbbbb", "type": "autoselect", "url": "", "label": "B"},
+            {"id": "g1gggggg", "type": "group", "url": "", "label": "G"}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True}],
+        "edges": [
+            {"from": "a1aaaaaa", "to": "a2bbbbbb"},   # auto→auto запрещено
+            {"from": "r1cccccc", "to": "a1aaaaaa"},   # route→auto запрещено
+            {"from": "g1gggggg", "to": "a1aaaaaa"},   # group→auto (proc→proc) запрещено
+            {"from": "a1aaaaaa", "to": "r1cccccc"}],  # auto→route ок
+        "node_meta": {"a1aaaaaa": {"autoselect": {"params": {}}},
+                      "a2bbbbbb": {"autoselect": {"params": {}}},
+                      "g1gggggg": {"group": {"buckets": [{"name": "G", "members": [{"link": "vless://x@h:443#K"}]}]}}},
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    edges = st.get_config()["edges"]
+    check("auto→auto отброшено", not any(e["from"] == "a1aaaaaa" and e["to"] == "a2bbbbbb" for e in edges))
+    check("route→auto отброшено", not any(e["from"] == "r1cccccc" and e["to"] == "a1aaaaaa" for e in edges))
+    check("group→auto (proc→proc) отброшено", not any(e["from"] == "g1gggggg" and e["to"] == "a1aaaaaa" for e in edges))
+    check("auto→route сохранено", any(e["from"] == "a1aaaaaa" and e["to"] == "r1cccccc" for e in edges))
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_migrate_domains, t_migrate_idempotent, t_migrate_deterministic,
@@ -945,7 +1038,9 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_group_balancer_emit, t_group_mixed_protocol, t_group_only_nonconvertible,
           t_group_passthrough_alongside, t_group_force_json, t_group_resolve,
           t_group_save_carry, t_group_sync_safety, t_group_rename_then_group_order,
-          t_group_rename_match_original, t_group_nameless_bucket_kept, t_group_resolve_dedup):
+          t_group_rename_match_original, t_group_nameless_bucket_kept, t_group_resolve_dedup,
+          t_autoselect_emit, t_autoselect_nonconvertible, t_autoselect_resolve_save,
+          t_autoselect_edges):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")

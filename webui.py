@@ -229,6 +229,7 @@ def render_editor(graph, sub_base, csrf, banner="", domains=None):
   <button class="btn" id="addSrc">+ Источник</button>
   <button class="btn" id="addKey">+ Ключ</button>
   <button class="btn" id="addGroup">+ Группа</button>
+  <button class="btn" id="addAuto">+ Авто-выбор</button>
   <button class="btn" id="addRoute">+ Маршрут</button>
   <button class="btn gray" id="reset">Сбросить вид</button>
   <button class="btn gray" id="blurToggle">Показать ссылки</button>

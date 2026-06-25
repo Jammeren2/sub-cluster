@@ -684,6 +684,24 @@ def _resolve_group_members(group):
     def _emit(u):  # ссылка для passthrough — с применённым переименованием/именем
         return _apply_name(u["link"], u["rename"]) if u.get("rename") is not None else u["link"]
 
+    # авто-режим (нода авто-выбора, roadmap/03A): ВСЕ конвертируемые ссылки → ОДИН
+    # балансер leastPing (клиент сам выберет быстрейший по пингу); неконвертируемые →
+    # отдельными записями. Корзины не используются.
+    if group.get("auto"):
+        obs, skipped = [], []
+        for u in universe:
+            ob, _name = _link_to_outbound(u["link"])
+            if ob is None:
+                skipped.append(_emit(u))
+            else:
+                obs.append(ob)
+        configs = [_wrap_as_balancer(obs, group.get("name") or "", group.get("params"))] if obs else []
+        if skipped:
+            schemes = _dedup([l.split("://", 1)[0] for l in skipped if "://" in l])
+            print(f"[-] авто-выбор «{group.get('name')}»: {len(skipped)} ссыл. неконвертируемого "
+                  f"протокола ({', '.join(schemes)}) → отдаю отдельными записями", flush=True)
+        return configs, [], skipped, infos, passthrough
+
     buckets = group.get("buckets", [])
     members_of = {i: [] for i in range(len(buckets))}
     skipped, leftover, assigned = [], [], set()
