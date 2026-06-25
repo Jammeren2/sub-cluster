@@ -126,12 +126,27 @@
   }
 
   function makeSource(s){
+    s.type = s.type || 'source';
     const n=el('div','node src'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
     const hd=el('div','hd'); hd.appendChild(el('span',null,'Источник')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
     const bd=el('div','bd');
     bd.appendChild(el('label',null,'Метка'));
     const lab=el('input'); lab.value=s.label||''; lab.placeholder='необязательно'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
     bd.appendChild(el('label',null,'Ссылка-подписка (upstream)'));
+    const url=el('input','mono'); url.value=s.url||''; url.placeholder='https://сервер/sub/xxxx'; mask(url); url.addEventListener('input',()=>{ s.url=url.value; markDirty(); }); bd.appendChild(url);
+    n.appendChild(bd);
+    dragHeader(hd,s,n); deleteBtn(x,s); n.appendChild(outSocket(s));
+    nodeEls[s.id]=n; world.appendChild(n);
+  }
+
+  function makeKey(s){
+    s.type = 'key';
+    const n=el('div','node key'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
+    const hd=el('div','hd'); hd.appendChild(el('span',null,'Ключ')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
+    const bd=el('div','bd');
+    bd.appendChild(el('label',null,'Название ключа'));
+    const lab=el('input'); lab.value=s.label||''; lab.placeholder='необязательно'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
+    bd.appendChild(el('label',null,'Ссылка-ключ (upstream)'));
     const url=el('input','mono'); url.value=s.url||''; url.placeholder='https://сервер/sub/xxxx'; mask(url); url.addEventListener('input',()=>{ s.url=url.value; markDirty(); }); bd.appendChild(url);
     n.appendChild(bd);
     dragHeader(hd,s,n); deleteBtn(x,s); n.appendChild(outSocket(s));
@@ -186,7 +201,8 @@
   },{passive:false});
 
   function centerWorld(){ const r=rect(); return {x:(r.width/2-view.panX)/view.zoom, y:(r.height/2-view.panY)/view.zoom}; }
-  document.getElementById('addSrc').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeSource(s); redrawWires(); markDirty(); });
+  document.getElementById('addSrc').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'source',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeSource(s); redrawWires(); markDirty(); });
+  document.getElementById('addKey').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'key',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeKey(s); redrawWires(); markDirty(); });
   document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
   document.getElementById('save').addEventListener('click',()=>save(false));
@@ -206,7 +222,7 @@
     pendingSave=false; pendingSilent=true;
     saving=true; setStat('… сохранение','dirty');
     const payload={
-      sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',x:Math.round(s.x),y:Math.round(s.y)})),
+      sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',type:s.type||'source',x:Math.round(s.x),y:Math.round(s.y)})),
       routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,announce:r.announce||'',x:Math.round(r.x),y:Math.round(r.y)})),
       edges:G.edges.map(e=>({from:e.from,to:e.to}))
     };
@@ -223,6 +239,6 @@
   }
 
   applyTransform();
-  G.sources.forEach(makeSource); G.routes.forEach(makeRoute);
+  G.sources.forEach(s=>{ if(s.type==='key') makeKey(s); else makeSource(s); }); G.routes.forEach(makeRoute);
   redrawWires(); refreshCounts(); setStat('', '');
 })();

@@ -96,6 +96,7 @@ def sync_graph_from_routes(cfg):
                     "id": (old or {}).get("id") or _new_id(),
                     "url": url,
                     "label": (old or {}).get("label", ""),
+                    "type": (old or {}).get("type", "source"),
                     "x": (old or {}).get("x"),
                     "y": (old or {}).get("y"),
                 }
@@ -293,6 +294,7 @@ def save_graph(store, data):
             "id": sid,
             "url": str(s.get("url") or "").strip()[:2048],
             "label": str(s.get("label") or "").strip()[:120],
+            "type": str(s.get("type") or "source") if str(s.get("type") or "") in ("source","key") else "source",
             "x": _num(s.get("x"), 80.0), "y": _num(s.get("y"), 80.0),
         })
 

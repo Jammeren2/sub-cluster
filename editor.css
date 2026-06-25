@@ -41,6 +41,7 @@ html,body{margin:0;height:100%;background:#1b1b1d;color:#e6e6e6;
   border-radius:8px 8px 0 0;cursor:grab;font-size:13px;font-weight:600;color:#fff;
   user-select:none;-webkit-user-select:none}
 .node.src .hd{background:linear-gradient(180deg,#35817a,#2c6f6a)}
+.node.key .hd{background:linear-gradient(180deg,#6d5ba8,#4d4c82)}
 .node.route .hd{background:linear-gradient(180deg,#c47d31,#b06f28)}
 .node .hd .x{cursor:pointer;opacity:.85;font-size:15px;line-height:1;padding:2px 5px;border-radius:4px}
 .node .hd .x:hover{opacity:1;background:rgba(0,0,0,.25)}

@@ -98,6 +98,7 @@ def render_editor(graph, sub_base, csrf, banner=""):
   {nav_links("/")}
   <span style="width:14px"></span>
   <button class="btn" id="addSrc">+ Источник</button>
+  <button class="btn" id="addKey">+ Ключ</button>
   <button class="btn" id="addRoute">+ Маршрут</button>
   <button class="btn gray" id="reset">Сбросить вид</button>
   <button class="btn gray" id="blurToggle">Показать ссылки</button>
@@ -110,7 +111,7 @@ def render_editor(graph, sub_base, csrf, banner=""):
 <div id="editor">
   <svg id="wires" xmlns="http://www.w3.org/2000/svg"></svg>
   <div id="world"></div>
-  <div id="hint">Пусто. Добавь «<b>+ Источник</b>» и «<b>+ Маршрут</b>», протяни связь и «<b>Сохранить</b>».<br>
+  <div id="hint">Пусто. Добавь «<b>+ Источник</b>» или «<b>+ Ключ</b>», потом «<b>+ Маршрут</b>», протяни связь и «<b>Сохранить</b>».<br>
     <span style="opacity:.7">Колесо — зум, перетаскивание фона — панорама.</span></div>
 </div>
 <div id="toast"></div>
