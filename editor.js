@@ -30,11 +30,23 @@
   function normPath(p){ p=(p||'').trim().replace(/^\/+|\/+$/g,''); return p?('/'+p):'/'; }
   function findAny(id){ return G.sources.find(x=>x.id===id) || G.routes.find(x=>x.id===id); }
   function isRoute(n){ return G.routes.indexOf(n)>=0; }
+  function isGroup(n){ return !!(n && n.type==='group'); }
   function isDirectLink(u){ return /^(vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic):\/\//i.test((u||'').trim()); }
+  const BAL_DEFAULTS = window.__BAL_DEFAULTS__ || {strategy:'leastPing',probe_url:'http://www.gstatic.com/generate_204',interval:'5m',timeout:'3s',sampling:2,domain_strategy:'AsIs'};
+  const _DEF_PORTS = {vless:443,trojan:443,tuic:443,hysteria2:443,hy2:443,hysteria:443};
+  function linkAddr(url){ try{ const u=new URL((url||'').trim()); const host=(u.hostname||'').toLowerCase(); if(!host) return ''; let port=u.port; if(!port){ port=_DEF_PORTS[(u.protocol||'').replace(':','').toLowerCase()]||''; } return port?(host+':'+port):host; }catch(e){ return ''; } }
 
-  // Гидрация ключей/переименований из node_meta (роль ноды выводим из данных, не только из type)
+  // Гидрация ключей/групп/переименований из node_meta (роль ноды выводим из данных, не только из type)
   G.sources.forEach(s=>{
     const meta = G.node_meta[s.id] || {};
+    if(meta.group || s.type==='group'){
+      s.type='group';
+      s.buckets = ((meta.group&&meta.group.buckets)||[]).map(b=>({name:b.name||'',
+          members:(b.members||[]).map(m=>m.link?{link:m.link}:{addr:m.addr||'',name:m.name||''})}));
+      s.gparams = Object.assign({}, (meta.group&&meta.group.params)||{});
+      s.buckets = s.buckets||[]; s.gparams = s.gparams||{};
+      return;  // группа не гидрируется как ключ/источник
+    }
     if(Array.isArray(meta.keys)){ s.type='key'; s.keys = meta.keys.map(k=>({link:k.link||'', name:k.name||''})); }
     else if(s.type==='key'){ s.keys = s.keys||[]; }
     else if(isDirectLink(s.url)){ s.type='key'; s.keys=[{link:s.url, name:s.label||''}]; s.url=''; }  // легаси прямой ключ
@@ -54,7 +66,7 @@
   function redrawWires(){
     while(svg.firstChild) svg.removeChild(svg.firstChild);
     G.edges.forEach(e=>{
-      const s=findAny(e.from), r=G.routes.find(x=>x.id===e.to);
+      const s=findAny(e.from), r=findAny(e.to);   // цель — маршрут ИЛИ группа
       if(!s||!r) return;
       const a=w2s(sockPos(s,'out')), b=w2s(sockPos(r,'in'));
       const p=document.createElementNS('http://www.w3.org/2000/svg','path');
@@ -122,23 +134,27 @@
     while(stack.length){ const n=stack.pop(); if(n===to) return true; if(seen.has(n)) continue; seen.add(n); (radj[n]||[]).forEach(x=>stack.push(x)); }
     return false;
   }
-  function finishConnect(route){
+  function finishConnect(target){
     if(!connecting) return;  // второй (всплывший) mouseup — ничего не делаем
-    if(route){
-      const f=connecting.from, t=route.id;
+    if(target){
+      const f=connecting.from, t=target.id, fromNode=findAny(f);
       if(f!==t && !G.edges.some(e=>e.from===f && e.to===t)){
-        if(G.routes.some(r=>r.id===f) && wouldCycle(f,t)){ showToast('Нельзя замкнуть цикл маршрутов',true); }
+        if(isGroup(target)){
+          // в группу можно тянуть только из источника/ключа
+          if(isGroup(fromNode) || isRoute(fromNode)) showToast('В группу — только из источника/ключа',true);
+          else { G.edges.push({from:f,to:t}); markDirty(); }
+        } else if(isRoute(fromNode) && wouldCycle(f,t)){ showToast('Нельзя замкнуть цикл маршрутов',true); }
         else { G.edges.push({from:f,to:t}); markDirty(); }
       }
     }
     connecting=null; tempPath=null; hoverIn=null; redrawWires(); refreshCounts();
   }
 
-  function outSocket(node){ const out=el('div','sock out'); out.title='Тяни в маршрут'; out.addEventListener('mousedown',ev=>startConnect(ev,node)); return out; }
-  function inSocket(route){
+  function outSocket(node){ const out=el('div','sock out'); out.title='Тяни в маршрут/группу'; out.addEventListener('mousedown',ev=>startConnect(ev,node)); return out; }
+  function inSocket(target){
     const inp=el('div','sock in'); inp.title='Вход';
-    inp.addEventListener('mouseenter',()=>hoverIn=route); inp.addEventListener('mouseleave',()=>{ if(hoverIn===route)hoverIn=null; });
-    inp.addEventListener('mouseup',()=>finishConnect(route));
+    inp.addEventListener('mouseenter',()=>hoverIn=target); inp.addEventListener('mouseleave',()=>{ if(hoverIn===target)hoverIn=null; });
+    inp.addEventListener('mouseup',()=>finishConnect(target));
     return inp;
   }
 
@@ -190,6 +206,109 @@
     n.appendChild(bd);
     dragHeader(hd,s,n); deleteBtn(x,s); n.appendChild(outSocket(s));
     nodeEls[s.id]=n; world.appendChild(n);
+  }
+
+  // ── нода-группа (страна → балансер) ──
+  function memberMatchesRow(m,row){ return m.link ? (m.link===row.link) : (m.addr===row.addr && m.name===row.name); }
+  function rowToMember(row){ return row.key ? {link:row.link} : {addr:row.addr, name:row.name}; }
+  function findRowBucket(s,row){ for(let i=0;i<s.buckets.length;i++){ if((s.buckets[i].members||[]).some(m=>memberMatchesRow(m,row))) return i; } return -1; }
+  function assignRow(s,row,bi){
+    s.buckets.forEach(b=>{ b.members=(b.members||[]).filter(m=>!memberMatchesRow(m,row)); });
+    if(bi>=0 && bi<s.buckets.length){ s.buckets[bi].members=s.buckets[bi].members||[]; s.buckets[bi].members.push(rowToMember(row)); }
+  }
+  function incomingNodes(g){ const froms=G.edges.filter(e=>e.to===g.id).map(e=>e.from); return G.sources.filter(x=>froms.indexOf(x.id)>=0); }
+  function dedupRows(rows){ const out=[],seen=new Set(); rows.forEach(r=>{ const k=r.key?('L:'+r.link):('A:'+r.addr+'|'+r.name); if(!seen.has(k)){ seen.add(k); out.push(r); } }); return out; }
+  function loadGroupLinks(g, btn, cb){
+    const ins=incomingNodes(g);
+    const keyRows=[];
+    ins.filter(x=>x.type==='key').forEach(x=>(x.keys||[]).forEach(k=>{ if((k.link||'').trim()) keyRows.push({name:k.name||'', addr:linkAddr(k.link), link:k.link.trim(), key:true}); }));
+    const subNodes=ins.filter(x=>x.type!=='key' && x.type!=='group' && (x.url||'').trim());
+    if(btn){ btn.disabled=true; btn.textContent='Загрузка…'; }
+    Promise.all(subNodes.map(x=>fetch(ADMIN+'/graph/preview',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify({url:x.url})})
+        .then(r=>r.json()).then(j=>(j&&j.ok)?(j.links||[]):[]).catch(()=>[])))
+      .then(per=>{ const subRows=[].concat.apply([],per).map(l=>({name:l.name||'', addr:l.addr||'', link:l.link||'', key:false}));
+        if(btn){ btn.disabled=false; btn.textContent='Обновить ссылки группы'; }
+        cb(dedupRows(keyRows.concat(subRows))); })
+      .catch(()=>{ if(btn){ btn.disabled=false; btn.textContent='Обновить ссылки группы'; } showToast('Не удалось загрузить ссылки',true); });
+  }
+  function renderGroupRows(s, box, rows, renderBuckets){
+    box.textContent='';
+    if(!rows.length){ box.appendChild(el('div','muted2','Нет входящих ссылок. Подключи источники/ключи в группу и нажми «Загрузить».')); return; }
+    rows.forEach(row=>{
+      const r=el('div','glrow');
+      const nm=el('div','gln'); nm.textContent=(row.name||'(без имени)')+(row.addr?(' · '+row.addr):''); nm.title=row.link||''; r.appendChild(nm);
+      const sel=el('select'); const o0=el('option',null,'(не в группе)'); o0.value='-1'; sel.appendChild(o0);
+      s.buckets.forEach((b,bi)=>{ const o=el('option',null,(b.name||('Корзина '+(bi+1)))); o.value=String(bi); sel.appendChild(o); });
+      sel.value=String(findRowBucket(s,row));
+      sel.addEventListener('change',()=>{ assignRow(s,row,parseInt(sel.value,10)); renderBuckets(); markDirty(); });
+      r.appendChild(sel); box.appendChild(r);
+    });
+  }
+  function bucketEl(s,b,renderBuckets){
+    const wrap=el('div','bucket');
+    const hdb=el('div','bhd');
+    const nm=el('input','bname'); nm.value=b.name||''; nm.placeholder='🇩🇪 Германия';
+    nm.addEventListener('input',()=>{ b.name=nm.value; markDirty(); });
+    const rm=el('span','brm','✕'); rm.title='Удалить корзину'; rm.addEventListener('mousedown',e=>e.stopPropagation());
+    rm.addEventListener('click',e=>{ e.stopPropagation(); const i=s.buckets.indexOf(b); if(i>=0)s.buckets.splice(i,1); renderBuckets(); markDirty(); });
+    hdb.appendChild(nm); hdb.appendChild(rm); wrap.appendChild(hdb);
+    const chips=el('div','bchips');
+    (b.members||[]).forEach(m=>{
+      const chip=el('div','memchip'); chip.appendChild(el('span',null, m.link?m.link:(m.name||m.addr||'?')));
+      const cx=el('span','cx','✕'); cx.addEventListener('mousedown',e=>e.stopPropagation());
+      cx.addEventListener('click',e=>{ e.stopPropagation(); const i=b.members.indexOf(m); if(i>=0)b.members.splice(i,1); renderBuckets(); markDirty(); });
+      chip.appendChild(cx); chips.appendChild(chip);
+    });
+    if(!(b.members||[]).length) chips.appendChild(el('div','muted2','выбери ссылки ниже'));
+    wrap.appendChild(chips);
+    return wrap;
+  }
+
+  function makeGroup(s){
+    s.type='group'; s.buckets=s.buckets||[]; s.gparams=s.gparams||{};
+    const n=el('div','node group'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
+    const hd=el('div','hd'); hd.appendChild(el('span',null,'Группа')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
+    const bd=el('div','bd');
+    bd.appendChild(el('label',null,'Метка / флаг группы (видна в клиенте)'));
+    const lab=el('input'); lab.value=s.label||''; lab.placeholder='🇩🇪 Германия'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
+
+    // параметры балансера
+    const pdet=el('details'); pdet.appendChild(el('summary',null,'Параметры балансера'));
+    const pbox=el('div','bparams');
+    function pfield(label,key,ph){ const w=el('div'); w.appendChild(el('label',null,label));
+      const inp=el('input'); inp.value=(s.gparams[key]!=null?s.gparams[key]:(BAL_DEFAULTS[key]!=null?BAL_DEFAULTS[key]:'')); inp.placeholder=ph||'';
+      inp.addEventListener('input',()=>{ s.gparams[key]=inp.value; markDirty(); }); w.appendChild(inp); return w; }
+    function psel(label,key,opts){ const w=el('div'); w.appendChild(el('label',null,label)); const sel=el('select');
+      opts.forEach(o=>{ const op=el('option',null,o); op.value=o; if((s.gparams[key]||BAL_DEFAULTS[key])===o)op.selected=true; sel.appendChild(op); });
+      sel.addEventListener('change',()=>{ s.gparams[key]=sel.value; markDirty(); }); w.appendChild(sel); return w; }
+    pbox.appendChild(psel('Стратегия','strategy',['leastPing','leastLoad','random','roundRobin']));
+    pbox.appendChild(pfield('Probe URL','probe_url','http://www.gstatic.com/generate_204'));
+    const grow=el('div','grow2'); grow.appendChild(pfield('Интервал','interval','5m')); grow.appendChild(pfield('Таймаут','timeout','3s')); pbox.appendChild(grow);
+    const grow2=el('div','grow2'); grow2.appendChild(pfield('Sampling','sampling','2')); grow2.appendChild(psel('domainStrategy','domain_strategy',['AsIs','IPIfNonMatch','IPOnDemand'])); pbox.appendChild(grow2);
+    pdet.appendChild(pbox); bd.appendChild(pdet);
+
+    // корзины + распределение входящих ссылок
+    let glRows = null;
+    bd.appendChild(el('label',null,'Корзины (страны)'));
+    const blist=el('div'); bd.appendChild(blist);
+    function refreshGL(){ if(glRows!==null) renderGroupRows(s, glbox, glRows, renderBuckets); }
+    function renderBuckets(){ blist.textContent=''; s.buckets.forEach(b=>blist.appendChild(bucketEl(s,b,renderBuckets))); refreshGL(); }
+    const addB=el('button','addkey','+ корзина'); addB.type='button'; addB.addEventListener('mousedown',e=>e.stopPropagation());
+    addB.addEventListener('click',e=>{ e.stopPropagation(); s.buckets.push({name:'',members:[]}); renderBuckets(); markDirty(); }); bd.appendChild(addB);
+
+    const det=el('details'); det.appendChild(el('summary',null,'Распределить входящие ссылки'));
+    const lbtn=el('button','loadlinks', (s.buckets.some(b=>(b.members||[]).length)?'Обновить ссылки группы':'Загрузить ссылки группы')); lbtn.type='button';
+    lbtn.addEventListener('mousedown',e=>e.stopPropagation());
+    lbtn.addEventListener('click',e=>{ e.stopPropagation(); loadGroupLinks(s, lbtn, rows=>{ glRows=rows; refreshGL(); }); });
+    const glbox=el('div','grouplinks');
+    det.appendChild(lbtn); det.appendChild(glbox); bd.appendChild(det);
+
+    const cnt=el('div','cnt'); cnt.dataset.rid=s.id; bd.appendChild(cnt);
+    n.appendChild(bd);
+    dragHeader(hd,s,n); deleteBtn(x,s);
+    n.appendChild(inSocket(s)); n.appendChild(outSocket(s));
+    nodeEls[s.id]=n; world.appendChild(n);
+    renderBuckets();
   }
 
   // ── переименование ссылок внутри подписки ──
@@ -286,6 +405,8 @@
   function centerWorld(){ const r=rect(); return {x:(r.width/2-view.panX)/view.zoom, y:(r.height/2-view.panY)/view.zoom}; }
   document.getElementById('addSrc').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'source',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeSource(s); redrawWires(); markDirty(); });
   document.getElementById('addKey').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'key',keys:[{link:'',name:''}],renames:[],x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeKey(s); redrawWires(); markDirty(); });
+  const addGroupBtn=document.getElementById('addGroup');
+  if(addGroupBtn) addGroupBtn.addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),type:'group',url:'',label:'',buckets:[],gparams:{},x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeGroup(s); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',domain_id:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
   document.getElementById('save').addEventListener('click',()=>save(false));
@@ -307,7 +428,18 @@
     const node_meta={};
     G.sources.forEach(s=>{
       const e={};
-      if(s.type==='key'){
+      if(s.type==='group'){
+        // как на сервере (_norm_node_meta): держим корзину, если есть имя ИЛИ члены,
+        // иначе непоименованная, но заполненная корзина молча терялась бы.
+        const buckets=(s.buckets||[]).filter(b=>(b.name||'').trim() || (b.members||[]).length).map(b=>({
+          name:(b.name||'').trim(),
+          members:(b.members||[]).map(m=>m.link?{link:m.link}:{addr:m.addr||'',name:m.name||''})}));
+        const params={};
+        ['strategy','probe_url','interval','timeout','sampling','domain_strategy'].forEach(k=>{
+          if(s.gparams && s.gparams[k]!=null && s.gparams[k]!=='') params[k]=s.gparams[k]; });
+        const g={}; if(buckets.length) g.buckets=buckets; if(Object.keys(params).length) g.params=params;
+        if(Object.keys(g).length) e.group=g;
+      } else if(s.type==='key'){
         const keys=(s.keys||[]).filter(k=>(k.link||'').trim()).map(k=>({link:k.link.trim(),name:k.name||''}));
         if(keys.length) e.keys=keys;
       } else {
@@ -335,6 +467,11 @@
   }
 
   applyTransform();
-  G.sources.forEach(s=>{ if(s.type==='key' || (s.keys&&s.keys.length)) makeKey(s); else makeSource(s); }); G.routes.forEach(makeRoute);
+  G.sources.forEach(s=>{
+    if(s.type==='group' || (G.node_meta[s.id]||{}).group) makeGroup(s);
+    else if(s.type==='key' || (s.keys&&s.keys.length)) makeKey(s);
+    else makeSource(s);
+  });
+  G.routes.forEach(makeRoute);
   redrawWires(); refreshCounts(); setStat('', '');
 })();

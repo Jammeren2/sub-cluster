@@ -95,6 +95,28 @@ body.unblur .blur{filter:none;cursor:auto}
 .addkey:hover,.loadlinks:hover{background:#3c3d45}
 .loadlinks:disabled{opacity:.6;cursor:default}
 
+/* ноды-группы (страна → балансер) */
+.node.group .hd{background:linear-gradient(180deg,#3a6ea5,#2c5680)}
+.bucket{display:flex;flex-direction:column;gap:5px;background:#242427;border:1px solid #34343a;
+  border-radius:6px;padding:6px;margin-top:6px}
+.bucket.dragover{border-color:#4fb3a6;background:#1f2a29}
+.bucket .bhd{display:flex;gap:5px;align-items:center}
+.bucket .bname{flex:1}
+.bucket .brm{cursor:pointer;font-size:12px;padding:3px 7px;border-radius:4px;background:#3a2a2a;color:#ffb0b0;
+  user-select:none;line-height:1.3;flex:none}
+.bucket .brm:hover{background:#4a3030}
+.bchips{display:flex;flex-wrap:wrap;gap:3px;margin-top:2px;min-height:14px}
+.memchip{display:inline-flex;gap:5px;align-items:center;background:#2c2c30;border:1px solid #3a3a40;
+  border-radius:999px;padding:2px 8px;font-size:10px;cursor:grab;max-width:100%}
+.memchip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.memchip .cx{cursor:pointer;color:#ffb0b0;flex:none}
+.grouplinks{display:flex;flex-direction:column;gap:5px;max-height:230px;overflow:auto;margin-top:6px}
+.glrow{display:flex;gap:6px;align-items:center;background:#242427;border:1px solid #34343a;border-radius:6px;padding:5px 6px}
+.glrow .gln{flex:1;font-size:11px;color:#9aa0aa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.glrow select{width:auto;flex:none;max-width:120px}
+.bparams .grow2{display:flex;gap:6px}
+.bparams .grow2 > div{flex:1}
+
 /* переименование ссылок внутри подписки */
 .linkbox{display:flex;flex-direction:column;gap:5px;max-height:230px;overflow:auto;margin-top:6px}
 .renrow{display:flex;flex-direction:column;gap:3px;background:#242427;border:1px solid #34343a;border-radius:6px;padding:5px 6px}

@@ -513,6 +513,207 @@ def _b64list(links):
     return base64.b64encode(("\n".join(_dedup(links))).encode("utf-8")).decode("ascii").encode("ascii")
 
 
+# ── нода-группа (страна) → один xray-конфиг с клиентским балансером leastPing ──
+# Всё, что специфично для схемы /s/sub «Быстрый», сосредоточено в _wrap_as_balancer
+# и _norm_balancer_params — подгонка под реальный экспорт = правка одной функции.
+_BALANCER_DEFAULTS = {
+    "strategy": "leastPing",                              # routing.balancers[].strategy.type
+    "probe_url": "http://www.gstatic.com/generate_204",   # burstObservatory.pingConfig.destination
+    "interval": "5m",
+    "timeout": "3s",
+    "sampling": 2,
+    "domain_strategy": "AsIs",                            # routing.domainStrategy
+}
+_STRATEGY_OK = {"leastPing", "leastLoad", "random", "roundRobin"}
+_DOMAINSTRAT_OK = {"AsIs", "IPIfNonMatch", "IPOnDemand"}
+_DURATION_RE = re.compile(r"^\d+(ms|s|m|h)$")
+
+
+def _norm_balancer_params(p):
+    """Параметры балансера группы → валидный/обрезанный набор (с дефолтами)."""
+    out = dict(_BALANCER_DEFAULTS)
+    if not isinstance(p, dict):
+        return out
+    if p.get("strategy") in _STRATEGY_OK:
+        out["strategy"] = p["strategy"]
+    if p.get("domain_strategy") in _DOMAINSTRAT_OK:
+        out["domain_strategy"] = p["domain_strategy"]
+    u = str(p.get("probe_url") or "").strip()
+    if u.startswith(("http://", "https://")):
+        out["probe_url"] = u[:256]
+    for k in ("interval", "timeout"):
+        v = str(p.get(k) or "").strip()
+        if _DURATION_RE.match(v):
+            out[k] = v
+    try:
+        s = int(p.get("sampling"))
+        if 1 <= s <= 8:
+            out["sampling"] = s
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def _wrap_as_balancer(member_outbounds, name, params=None):
+    """N member-outbound'ов → ОДИН самодостаточный xray-конфиг (элемент Happ-массива)
+    с клиентским балансером leastPing + burstObservatory (схема /s/sub «Быстрый»).
+    Теги: proxy-0..proxy-(N-1). Selector по префиксу 'proxy-' → direct/block НЕ входят.
+    Это же ядро для roadmap/03A (одна корзина = все входы). Чисто структурная функция:
+    конвертация ссылок в outbound'ы — у вызывающего."""
+    p = _norm_balancer_params(params)
+    obs = []
+    for i, ob in enumerate(member_outbounds):
+        ob = dict(ob)
+        ob["tag"] = f"proxy-{i}"            # перетираем тег → уникальный, префиксный
+        obs.append(ob)
+    obs.append({"protocol": "freedom", "tag": "direct"})
+    obs.append({"protocol": "blackhole", "tag": "block"})
+    return {
+        "remarks": name,
+        "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
+        "inbounds": [
+            {"tag": "socks", "port": 10808, "listen": "127.0.0.1",
+             "protocol": "socks", "settings": {"udp": True}},
+            {"tag": "http", "port": 10809, "listen": "127.0.0.1", "protocol": "http"},
+        ],
+        "outbounds": obs,
+        "routing": {
+            "domainStrategy": p["domain_strategy"],
+            "balancers": [{
+                "tag": "balancer",
+                "selector": ["proxy-"],            # префикс → все proxy-N
+                "strategy": {"type": p["strategy"]},
+            }],
+            "rules": [{
+                "type": "field",
+                "inboundTag": ["socks", "http"],
+                "balancerTag": "balancer",
+            }],
+        },
+        "burstObservatory": {
+            "subjectSelector": ["proxy-"],         # наблюдаем только членов балансера
+            "pingConfig": {
+                "destination": p["probe_url"],
+                "interval": p["interval"],
+                "timeout": p["timeout"],
+                "sampling": p["sampling"],
+            },
+        },
+    }
+
+
+def _member_match(u, members):
+    """u = {"link","addr","name"}; members — члены корзины ({addr,name} | {link}).
+    Гибрид как _match_rename: 1) точная ссылка-ключ; 2) addr+имя; 3) уникальный addr; 4) имя."""
+    if not members:
+        return False
+    addr, name, link = u["addr"], u["name"], u["link"]
+    for m in members:
+        if m.get("link") and m["link"] == link:
+            return True
+    for m in members:
+        if not m.get("link") and m.get("addr") == addr and m.get("name") == name:
+            return True
+    addr_ms = [m for m in members if not m.get("link") and m.get("addr") == addr]
+    if addr and len(addr_ms) == 1:
+        return True
+    for m in members:
+        if not m.get("link") and name and m.get("name") == name:
+            return True
+    return False
+
+
+def _dedup_configs(configs):
+    out, seen = [], set()
+    for c in configs:
+        ident = _config_identity(c)
+        if ident not in seen:
+            seen.add(ident)
+            out.append(c)
+    return out
+
+
+def _resolve_group_members(group):
+    """group = {name, params, buckets, subs, keys} (из resolve_links_spec). Скачивает
+    подписки группы (кэш общий), добавляет её прямые ключи → плоский набор ссылок с
+    (addr,name). Порядок Q7: сопоставление с корзиной по (addr,name), ЗАТЕМ переименование
+    источника применяется к имени ссылки. Имя корзины → remarks конфига.
+    → (configs, leftover_links, skipped_links, infos, passthrough):
+      configs       — по одному leastPing-конфигу на НЕпустую корзину;
+      leftover_links— конвертируемые ссылки вне корзин → passthrough (как сегодня);
+      skipped_links — неконвертируемые в xray (hysteria2/tuic/ssr), даже в корзине → passthrough+лог;
+      infos/passthrough — для агрегации Subscription-Userinfo и заголовков."""
+    # universe: ИСХОДНАЯ ссылка/addr/имя (для матча корзины) + отложенное переименование
+    # ("rename"), которое применяется ТОЛЬКО при passthrough (Q7: сначала группа, потом
+    # переименование). У члена балансера имя всё равно затирается тегом proxy-N, а имя
+    # корзины становится remarks — поэтому внутри балансера rename не нужен.
+    universe, seen = [], set()          # [{"link","addr","name","rename"}]
+    infos, passthrough = [], {}
+    for sub in group.get("subs", []):
+        url = (sub or {}).get("url")
+        if not url:
+            continue
+        renames = (sub or {}).get("renames") or []
+        try:
+            body, headers = fetch_upstream_cached(url)
+        except Exception as e:
+            print(f"[-] группа «{group.get('name')}»: апстрим {url} недоступен: {e}", flush=True)
+            continue
+        ui = headers.get("Subscription-Userinfo")
+        if ui:
+            infos.append(_parse_userinfo(ui))
+        for k in _MERGE_PASSTHROUGH:
+            if k not in passthrough and headers.get(k):
+                passthrough[k] = headers[k]
+        for link in extract_links(body):
+            if link in seen:
+                continue
+            seen.add(link)
+            addr, nm = _link_addr(link), _frag_name(link)
+            universe.append({"link": link, "addr": addr, "name": nm,
+                             "rename": _match_rename(addr, nm, renames)})  # НЕ применяем до матча
+    for k in group.get("keys", []):
+        raw = (k.get("link") or "").strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        # имя ключа применяем только при passthrough; для матча корзины — исходная ссылка
+        universe.append({"link": raw, "addr": _link_addr(raw),
+                         "name": k.get("name") or _frag_name(raw), "rename": (k.get("name") or None)})
+
+    def _emit(u):  # ссылка для passthrough — с применённым переименованием/именем
+        return _apply_name(u["link"], u["rename"]) if u.get("rename") is not None else u["link"]
+
+    buckets = group.get("buckets", [])
+    members_of = {i: [] for i in range(len(buckets))}
+    skipped, leftover, assigned = [], [], set()
+    for idx, b in enumerate(buckets):
+        for u in universe:
+            if u["link"] in assigned:
+                continue
+            if _member_match(u, b.get("members", [])):   # матч по ИСХОДНОЙ идентичности
+                assigned.add(u["link"])
+                ob, _name = _link_to_outbound(u["link"])
+                if ob is None:
+                    skipped.append(_emit(u))        # в корзине, но не xray → passthrough
+                else:
+                    members_of[idx].append(ob)
+    for u in universe:
+        if u["link"] not in assigned:
+            leftover.append(_emit(u))               # вне корзин → passthrough
+
+    configs = []
+    for idx, b in enumerate(buckets):
+        obs = members_of[idx]
+        if obs:                                      # пустую корзину НЕ эмитим
+            configs.append(_wrap_as_balancer(obs, b.get("name") or "", group.get("params")))
+    if skipped:
+        schemes = _dedup([l.split("://", 1)[0] for l in skipped if "://" in l])
+        print(f"[-] группа «{group.get('name')}»: {len(skipped)} ссыл. неконвертируемого "
+              f"протокола ({', '.join(schemes)}) в корзинах → отдаю отдельными записями", flush=True)
+    return configs, leftover, skipped, infos, passthrough
+
+
 def build_merged_response(route, spec, announce=""):
     """Слияние подписок и прямых ключей в один ответ.
        spec = {"subs":[{"url","renames"}], "keys":[{"link","name"}]}.
@@ -524,6 +725,7 @@ def build_merged_response(route, spec, announce=""):
     дедупа (гибрид: адрес → имя)."""
     subs = spec.get("subs", []) if isinstance(spec, dict) else []
     keys = spec.get("keys", []) if isinstance(spec, dict) else []
+    groups = spec.get("groups", []) if isinstance(spec, dict) else []
 
     json_items = []   # [{"cfg","addr","name","renames"}]  (дедуп по identity без remarks)
     seen_cfg = set()
@@ -581,10 +783,22 @@ def build_merged_response(route, spec, announce=""):
     # Прямые ключи → строки ссылок с заданным именем.
     key_links = [_apply_name(k["link"], k.get("name") or "") for k in keys if (k.get("link") or "").strip()]
 
-    have_json = bool(json_items)
+    # Ноды-группы: каждая непустая корзина → один конфиг с балансером; членов вне корзин
+    # и неконвертируемых отдаём отдельными ссылками (passthrough), не теряя.
+    group_configs, group_pass = [], []
+    for g in groups:
+        cfgs, leftover, skipped, g_infos, g_pass = _resolve_group_members(g)
+        group_configs.extend(cfgs)
+        group_pass.extend(leftover)
+        group_pass.extend(skipped)
+        infos.extend(g_infos)
+        for k, v in g_pass.items():
+            passthrough.setdefault(k, v)
+
+    have_json = bool(json_items) or bool(group_configs)   # балансер форсит JSON
     out_configs = [it["cfg"] for it in json_items]
     out_links = [it["link"] for it in text_items]
-    flat = _dedup(out_links + key_links)
+    flat = _dedup(out_links + key_links + group_pass)
 
     if have_json:
         # Есть хотя бы одна подписка-«нода» (JSON-конфиги Happ) — СОХРАНЯЕМ группировку:
@@ -604,7 +818,10 @@ def build_merged_response(route, spec, announce=""):
                   f"({', '.join(schemes)}) — группировка JSON-нод сохранена", flush=True)
         out_headers = {"Content-Type": "application/json; charset=utf-8"}
         out_headers.update(passthrough)
-        payload = json.dumps(out_configs + extra, ensure_ascii=False).encode("utf-8")
+        # конфиги-группы (балансеры) идут первыми, затем JSON-ноды источников, затем
+        # обёрнутые плоские ссылки; дедуп по полному identity (с remarks).
+        payload = json.dumps(_dedup_configs(group_configs + out_configs + extra),
+                             ensure_ascii=False).encode("utf-8")
     else:
         # Только плоские источники/ключи (или ничего) — base64-список ссылок.
         payload = _b64list(flat)
@@ -628,10 +845,11 @@ def build_route_response(route, spec=None, announce=""):
         spec = {"subs": [{"url": u, "renames": []} for u in route.get("upstreams", [])], "keys": []}
     subs = spec.get("subs", [])
     keys = spec.get("keys", [])
+    groups = spec.get("groups", [])
     mode = route.get("mode", "merge")
     has_renames = any((s.get("renames") for s in subs))
-    # Зеркало байт-в-байт возможно только без ключей/переименований и с одной подпиской.
-    if mode == "mirror" and len(subs) == 1 and not keys and not has_renames:
+    # Зеркало байт-в-байт возможно только без ключей/групп/переименований и с одной подпиской.
+    if mode == "mirror" and len(subs) == 1 and not keys and not groups and not has_renames:
         return build_mirror_response(route, subs[0]["url"], announce)
     return build_merged_response(route, spec, announce)
 

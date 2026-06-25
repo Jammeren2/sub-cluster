@@ -85,6 +85,12 @@ VLESS_T = "vless://uid2@host2:443?type=tcp&security=none#Srv2"
 FAKE["https://json/sub"] = (json.dumps([json_config(VLESS_J)]).encode(), {"Content-Type": "application/json"})
 FAKE["https://text/sub"] = (b64(VLESS_T), {"Content-Type": "text/plain"})
 FAKE["https://mirror/sub"] = (b"RAW-MIRROR-BYTES", {"Content-Type": "text/plain", "Profile-Title": "up"})
+# для нод-групп
+FAKE["https://de/sub"] = (b64("vless://d1@de1:443?type=tcp#DE-1\nvless://d2@de2:443?type=tcp#DE-2"), {})
+FAKE["https://mix/sub"] = (b64("vless://v@h1:443?type=tcp#V\nss://YWVzLTI1Ni1nY206cHc@h2:8388#S\nhysteria2://p@h3:443#HY"), {})
+FAKE["https://hy/sub"] = (b64("hysteria2://p@h9:443#HY1\ntuic://u@h8:443#TU1"), {})
+FAKE["https://dup/sub"] = (b64("vless://a@dup:443?type=tcp#A1\nvless://b@dup:443?type=tcp#A2"), {})
+FAKE["https://deui/sub"] = (b64("vless://d1@de1:443?type=tcp#DE-1"), {"Subscription-Userinfo": "upload=0; download=0; total=1000"})
 
 
 def base_graph(st, extra_meta=None):
@@ -687,6 +693,247 @@ def t_fourth_level_domain():
           (graph.find_route(st, "/p", host="happ.example.com") or {}).get("id") == "r3000000")
 
 
+# ── ноды-группы (страна → JSON-конфиг с балансером leastPing) ───────────────
+def _group_spec(name, members, subs_list, params=None, keys_list=None):
+    return {"subs": [], "keys": [], "groups": [{
+        "name": name, "params": params or {},
+        "buckets": [{"name": name, "members": members}],
+        "subs": subs_list, "keys": keys_list or []}]}
+
+
+def t_group_balancer_emit():
+    print("\n[28] группа → один конфиг с балансером leastPing")
+    route = {"id": "r", "title": "T", "mode": "merge"}
+    spec = _group_spec("🇩🇪 Германия",
+                       [{"addr": "de1:443", "name": "DE-1"}, {"addr": "de2:443", "name": "DE-2"}],
+                       [{"url": "https://de/sub", "renames": []}], {"strategy": "leastPing"})
+    payload, h = subs.build_merged_response(route, spec)
+    check("Content-Type JSON", "application/json" in h.get("Content-Type", ""))
+    cfgs = json.loads(payload.decode())
+    check("один конфиг группы", len(cfgs) == 1, len(cfgs))
+    c = cfgs[0]
+    check("remarks = имя корзины", c.get("remarks") == "🇩🇪 Германия", c.get("remarks"))
+    tags = [o.get("tag") for o in c.get("outbounds", [])]
+    check("теги proxy-0/proxy-1/direct/block", tags == ["proxy-0", "proxy-1", "direct", "block"], tags)
+    bal = c["routing"]["balancers"][0]
+    check("balancer selector proxy-", bal["selector"] == ["proxy-"])
+    check("strategy leastPing", bal["strategy"]["type"] == "leastPing")
+    check("routing rule balancerTag", c["routing"]["rules"][0]["balancerTag"] == "balancer")
+    check("burstObservatory subjectSelector proxy-", c["burstObservatory"]["subjectSelector"] == ["proxy-"])
+    check("pingConfig destination задан", bool(c["burstObservatory"]["pingConfig"]["destination"]))
+
+
+def t_group_mixed_protocol():
+    print("\n[29] группа: vless+ss в балансере, hysteria2 не входит")
+    route = {"id": "r", "mode": "merge"}
+    spec = _group_spec("Микс",
+                       [{"addr": "h1:443", "name": "V"}, {"addr": "h2:8388", "name": "S"},
+                        {"addr": "h3:443", "name": "HY"}],
+                       [{"url": "https://mix/sub", "renames": []}])
+    payload, h = subs.build_merged_response(route, spec)
+    cfgs = json.loads(payload.decode())
+    bal = next((c for c in cfgs if c.get("remarks") == "Микс"), None)
+    check("балансер создан", bal is not None)
+    members = [o for o in bal["outbounds"] if str(o.get("tag", "")).startswith("proxy-")]
+    check("в балансере ровно 2 члена (vless+ss)", len(members) == 2, len(members))
+    check("протоколы vless+shadowsocks",
+          sorted(o.get("protocol") for o in members) == ["shadowsocks", "vless"])
+    check("hysteria2 не в выдаче (JSON форсирован — passthrough hy2 невозможен, лог)",
+          "hysteria2" not in payload.decode())
+
+
+def t_group_only_nonconvertible():
+    print("\n[30] группа из только-неконвертируемых → balancer не эмитится, passthrough base64")
+    route = {"id": "r", "mode": "merge"}
+    spec = _group_spec("HY", [{"addr": "h9:443", "name": "HY1"}, {"addr": "h8:443", "name": "TU1"}],
+                       [{"url": "https://hy/sub", "renames": []}])
+    payload, h = subs.build_merged_response(route, spec)
+    check("нет балансера → base64 (не JSON)", "text/plain" in h.get("Content-Type", ""))
+    links = links_from_b64(payload)
+    check("hysteria2 отдан отдельной ссылкой (не потерян)", any("h9:443" in l for l in links), links)
+    check("tuic отдан отдельной ссылкой", any("h8:443" in l for l in links), links)
+
+
+def t_group_passthrough_alongside():
+    print("\n[31] группа + небукетированная ссылка рядом")
+    route = {"id": "r", "mode": "merge"}
+    spec = _group_spec("🇩🇪", [{"addr": "de1:443", "name": "DE-1"}],
+                       [{"url": "https://de/sub", "renames": []}])
+    payload, h = subs.build_merged_response(route, spec)
+    cfgs = json.loads(payload.decode())
+    check("два конфига (балансер + обёрнутый DE-2)", len(cfgs) == 2, len(cfgs))
+    check("балансер первым", cfgs[0].get("remarks") == "🇩🇪")
+    bmembers = [o for o in cfgs[0]["outbounds"] if str(o.get("tag", "")).startswith("proxy-")]
+    check("в балансере 1 член (DE-1)", len(bmembers) == 1, len(bmembers))
+    check("DE-2 отдан отдельным конфигом", any(c.get("remarks") == "DE-2" for c in cfgs))
+
+
+def t_group_force_json():
+    print("\n[32] группа форсирует JSON даже с text-подпиской рядом")
+    route = {"id": "r", "mode": "merge"}
+    spec = {"subs": [{"url": "https://text/sub", "renames": []}], "keys": [], "groups": [{
+        "name": "G", "params": {}, "buckets": [{"name": "G", "members": [{"addr": "de1:443", "name": "DE-1"}]}],
+        "subs": [{"url": "https://de/sub", "renames": []}], "keys": []}]}
+    payload, h = subs.build_merged_response(route, spec)
+    check("формат JSON (не base64)", "application/json" in h.get("Content-Type", ""))
+    cfgs = json.loads(payload.decode())
+    check("балансер + обёрнутая text-ссылка (host2)", any(c.get("remarks") == "G" for c in cfgs)
+          and any("host2" in json.dumps(c) for c in cfgs))
+
+
+def t_group_resolve():
+    print("\n[33] resolve_links_spec: s1 → g1(bucket) → r1")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "s1bbbbbb", "type": "source", "url": "https://de/sub"},
+            {"id": "g1gggggg", "type": "group", "url": "", "label": "🇩🇪 Германия"},
+        ],
+        "routes": [{"id": "r1cccccc", "path": "/g", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "s1bbbbbb", "to": "g1gggggg"}, {"from": "g1gggggg", "to": "r1cccccc"}],
+        "node_meta": {"g1gggggg": {"group": {
+            "buckets": [{"name": "🇩🇪 Германия", "members": [{"addr": "de1:443", "name": "DE-1"}]}],
+            "params": {"strategy": "leastPing"}}}},
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    spec = graph.resolve_links_spec(st, get_route(st, "r1cccccc"))
+    check("spec содержит группу", len(spec.get("groups", [])) == 1, spec.get("groups"))
+    g = spec["groups"][0]
+    check("имя группы из label", g["name"] == "🇩🇪 Германия", g["name"])
+    check("подписка группы — de/sub", any(s["url"] == "https://de/sub" for s in g["subs"]))
+    check("корзина группы цела", g["buckets"][0]["name"] == "🇩🇪 Германия")
+    # сборка ответа материализует de1 в балансер
+    payload, h = subs.build_route_response(get_route(st, "r1cccccc"), spec)
+    check("отдача — JSON c балансером", "application/json" in h.get("Content-Type", "")
+          and any(c.get("remarks") == "🇩🇪 Германия" for c in json.loads(payload.decode())))
+
+
+def t_group_save_carry():
+    print("\n[34] save_graph несёт ноду-группу; classic-путь её не стирает")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "s1bbbbbb", "type": "source", "url": "https://de/sub"},
+            {"id": "g1gggggg", "type": "group", "url": "", "label": "G"},
+        ],
+        "routes": [{"id": "r1cccccc", "path": "/g", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "s1bbbbbb", "to": "g1gggggg"}, {"from": "g1gggggg", "to": "r1cccccc"}],
+        "node_meta": {"g1gggggg": {"group": {
+            "buckets": [{"name": "G", "members": [{"addr": "de1:443", "name": "DE-1"}]}], "params": {}}}},
+    }
+    graph.save_graph(st, data)
+    cfg = st.get_config()
+    g = next((s for s in cfg["sources"] if s["id"] == "g1gggggg"), None)
+    check("группа сохранена с type=group", g and g.get("type") == "group", g)
+    check("node_meta.group.buckets целы", cfg["node_meta"]["g1gggggg"]["group"]["buckets"][0]["name"] == "G")
+    check("ребро group→route цело", any(e["from"] == "g1gggggg" and e["to"] == "r1cccccc" for e in cfg["edges"]))
+    check("ребро source→group цело", any(e["from"] == "s1bbbbbb" and e["to"] == "g1gggggg" for e in cfg["edges"]))
+    check("upstreams маршрута пусты (группа не идёт в upstreams)", get_route(st)["upstreams"] == [])
+    # classic-путь (add_route → sync_graph_from_routes) не должен стереть группу/рёбра
+    graph.add_route(st, "/other", "Other", ["https://text/sub"], "merge")
+    cfg2 = st.get_config()
+    sids = {s["id"] for s in cfg2["sources"]}
+    check("группа жива после add_route", "g1gggggg" in sids)
+    check("источник группы жив после add_route", "s1bbbbbb" in sids)
+    check("рёбра группы живы после add_route",
+          any(e["from"] == "s1bbbbbb" and e["to"] == "g1gggggg" for e in cfg2["edges"])
+          and any(e["from"] == "g1gggggg" and e["to"] == "r1cccccc" for e in cfg2["edges"]))
+
+
+def t_group_sync_safety():
+    print("\n[35] нода-группа переживает запись старого узла")
+    st = new_store()
+    graph.save_graph(st, {
+        "sources": [{"id": "g1gggggg", "type": "group", "url": "", "label": "G"}],
+        "routes": [{"id": "r1cccccc", "path": "/g", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "g1gggggg", "to": "r1cccccc"}],
+        "node_meta": {"g1gggggg": {"group": {
+            "buckets": [{"name": "G", "members": [{"link": "vless://x@h:443#K"}]}], "params": {}}}},
+    })
+    # старый узел переписывает только sources/routes/edges (как dict-копии)
+    st.update_config(lambda cfg: (cfg.__setitem__("sources", [dict(s) for s in cfg["sources"]]),
+                                  cfg.__setitem__("edges", [dict(e) for e in cfg["edges"]])))
+    cfg = st.get_config()
+    check("нода-группа в sources цела", any(s["id"] == "g1gggggg" for s in cfg["sources"]))
+    check("node_meta.group пережил запись старого узла",
+          bool(cfg.get("node_meta", {}).get("g1gggggg", {}).get("group")))
+
+
+def t_group_rename_then_group_order():
+    print("\n[36] порядок: матч корзины по addr, затем переименование; remarks = имя корзины")
+    route = {"id": "r", "mode": "merge"}
+    # источник переименовал DE-1 → «Германия-1»; корзина матчит по addr+исходному имени
+    spec = {"subs": [], "keys": [], "groups": [{
+        "name": "🇩🇪 Германия", "params": {},
+        "buckets": [{"name": "🇩🇪 Германия", "members": [{"addr": "de1:443", "name": "DE-1"}]}],
+        "subs": [{"url": "https://de/sub",
+                  "renames": [{"addr": "de1:443", "name": "DE-1", "to": "Германия-1"}]}], "keys": []}]}
+    payload, h = subs.build_merged_response(route, spec)
+    cfgs = json.loads(payload.decode())
+    bal = next((c for c in cfgs if "Германия" in (c.get("remarks") or "")), None)
+    check("корзина собрала член (addr стабилен при переименовании)",
+          bal is not None and any(str(o.get("tag", "")).startswith("proxy-") for o in bal["outbounds"]))
+    check("remarks конфига = имя корзины, не имя члена", bal.get("remarks") == "🇩🇪 Германия", bal.get("remarks"))
+
+
+def t_group_rename_match_original():
+    print("\n[37] корзина матчит по ИСХОДНОМУ имени; переименование — после (член не теряется)")
+    route = {"id": "r", "mode": "merge"}
+    # два члена с ОДИНАКОВЫМ addr (tier2 unique-addr не спасёт) + переименование A1 на источнике.
+    # До фикса A1 переименовывался ДО матча → tier1 по имени падал → A1 терялся.
+    spec = {"subs": [], "keys": [], "groups": [{
+        "name": "G", "params": {},
+        "buckets": [{"name": "G", "members": [{"addr": "dup:443", "name": "A1"},
+                                              {"addr": "dup:443", "name": "A2"}]}],
+        "subs": [{"url": "https://dup/sub",
+                  "renames": [{"addr": "dup:443", "name": "A1", "to": "RA1"}]}], "keys": []}]}
+    payload, h = subs.build_merged_response(route, spec)
+    bal = next((c for c in json.loads(payload.decode()) if c.get("remarks") == "G"), None)
+    members = [o for o in (bal or {}).get("outbounds", []) if str(o.get("tag", "")).startswith("proxy-")]
+    check("оба члена в балансере, несмотря на переименование A1 (матч по исходному имени)",
+          len(members) == 2, len(members))
+
+
+def t_group_nameless_bucket_kept():
+    print("\n[38] безымянная корзина с членами сохраняется (сервер ↔ редактор согласованы)")
+    st = new_store()
+    graph.save_graph(st, {
+        "sources": [{"id": "g1gggggg", "type": "group", "url": "", "label": "G"}],
+        "routes": [{"id": "r1cccccc", "path": "/g", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "g1gggggg", "to": "r1cccccc"}],
+        "node_meta": {"g1gggggg": {"group": {
+            "buckets": [{"name": "", "members": [{"addr": "de1:443", "name": "DE-1"}]}], "params": {}}}},
+    })
+    bks = st.get_config()["node_meta"]["g1gggggg"]["group"]["buckets"]
+    check("безымянная корзина с членами не выброшена", len(bks) == 1 and bks[0]["members"], bks)
+
+
+def t_group_resolve_dedup():
+    print("\n[39] группа на входе двух маршрутов резолвится один раз (userinfo не задваивается)")
+    st = new_store()
+    graph.save_graph(st, {
+        "sources": [
+            {"id": "s1bbbbbb", "type": "source", "url": "https://deui/sub"},
+            {"id": "g1gggggg", "type": "group", "url": "", "label": "G"}],
+        "routes": [
+            {"id": "r1cccccc", "path": "/a", "mode": "merge", "enabled": True},
+            {"id": "r2dddddd", "path": "/b", "mode": "merge", "enabled": True}],
+        "edges": [
+            {"from": "s1bbbbbb", "to": "g1gggggg"},
+            {"from": "g1gggggg", "to": "r1cccccc"},
+            {"from": "g1gggggg", "to": "r2dddddd"},
+            {"from": "r1cccccc", "to": "r2dddddd"}],
+        "node_meta": {"g1gggggg": {"group": {
+            "buckets": [{"name": "G", "members": [{"addr": "de1:443", "name": "DE-1"}]}], "params": {}}}},
+    })
+    spec = graph.resolve_links_spec(st, get_route(st, "r2dddddd"))
+    check("группа в spec один раз (не задвоена)", len(spec.get("groups", [])) == 1, len(spec.get("groups", [])))
+    payload, h = subs.build_route_response(get_route(st, "r2dddddd"), spec)
+    check("Subscription-Userinfo не задвоен (total=1000)",
+          "total=1000" in (h.get("Subscription-Userinfo") or ""), h.get("Subscription-Userinfo"))
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_migrate_domains, t_migrate_idempotent, t_migrate_deterministic,
@@ -694,7 +941,11 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_find_route_host, t_effective_domain_fallback, t_host_norm,
           t_provider_from_domain, t_normalize_domains, t_merge_failover_per_domain,
           t_failover_oldnode_compat, t_failover_summary_mirror, t_per_domain_active,
-          t_disabled_default_repair, t_find_route_exact_wins, t_fourth_level_domain):
+          t_disabled_default_repair, t_find_route_exact_wins, t_fourth_level_domain,
+          t_group_balancer_emit, t_group_mixed_protocol, t_group_only_nonconvertible,
+          t_group_passthrough_alongside, t_group_force_json, t_group_resolve,
+          t_group_save_carry, t_group_sync_safety, t_group_rename_then_group_order,
+          t_group_rename_match_original, t_group_nameless_bucket_kept, t_group_resolve_dedup):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")

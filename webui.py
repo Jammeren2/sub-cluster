@@ -12,6 +12,7 @@ webui.py — рендеринг веб-панели администратора
 import json
 import time
 
+import subscriptions
 from ui_assets import EDITOR_CSS, EDITOR_JS, PAGE_CSS
 
 
@@ -227,6 +228,7 @@ def render_editor(graph, sub_base, csrf, banner="", domains=None):
   <span style="width:14px"></span>
   <button class="btn" id="addSrc">+ Источник</button>
   <button class="btn" id="addKey">+ Ключ</button>
+  <button class="btn" id="addGroup">+ Группа</button>
   <button class="btn" id="addRoute">+ Маршрут</button>
   <button class="btn gray" id="reset">Сбросить вид</button>
   <button class="btn gray" id="blurToggle">Показать ссылки</button>
@@ -243,7 +245,7 @@ def render_editor(graph, sub_base, csrf, banner="", domains=None):
     <span style="opacity:.7">Колесо — зум, перетаскивание фона — панорама.</span></div>
 </div>
 <div id="toast"></div>
-<script>window.__GRAPH__={js_embed(graph)};window.__ADMIN__="";window.__CSRF__={js_embed(csrf)};window.__BASE__={js_embed(sub_base)};window.__DOMAINS__={js_embed(domains or [])};</script>
+<script>window.__GRAPH__={js_embed(graph)};window.__ADMIN__="";window.__CSRF__={js_embed(csrf)};window.__BASE__={js_embed(sub_base)};window.__DOMAINS__={js_embed(domains or [])};window.__BAL_DEFAULTS__={js_embed(subscriptions._BALANCER_DEFAULTS)};</script>
 <script>{EDITOR_JS}</script>
 </body></html>"""
 
