@@ -270,11 +270,11 @@ def _config_addr_name(cfg):
 
 
 def _config_identity(cfg):
-    """Ключ дедупа конфига БЕЗ учёта remarks (иначе одинаковые конфиги с разными
-    косметическими именами не схлопываются)."""
+    """Ключ дедупа конфига — полный JSON (с учётом remarks): два конфига, которые
+    различаются только именем, считаем РАЗНЫМИ «нодами» и оба сохраняем (как в
+    исходной логике), чтобы не терять именованные группы из подписки."""
     try:
-        c = {k: v for k, v in cfg.items() if k != "remarks"} if isinstance(cfg, dict) else cfg
-        return json.dumps(c, sort_keys=True, ensure_ascii=False)
+        return json.dumps(cfg, sort_keys=True, ensure_ascii=False)
     except Exception:
         return json.dumps(cfg, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -378,6 +378,137 @@ def _wrap_as_config(outbound, name):
     }
 
 
+def _maybe_b64(s):
+    """Декодировать base64(method:password…) если это base64; иначе вернуть как есть."""
+    s = (s or "").strip()
+    try:
+        dec = base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode("utf-8")
+        if ":" in dec:
+            return dec
+    except Exception:
+        pass
+    return s
+
+
+def _split_hostport(hp):
+    hp = (hp or "").strip()
+    if hp.startswith("["):                         # IPv6 [::1]:port
+        host, _, rest = hp[1:].partition("]")
+        return host, rest.lstrip(":")
+    if ":" in hp:
+        host, port = hp.rsplit(":", 1)
+        return host, port
+    return hp, ""
+
+
+def _trojan_to_outbound(url, tag="proxy"):
+    try:
+        u = urllib.parse.urlsplit(url)
+        if u.scheme.lower() != "trojan" or not u.hostname:
+            return None, None
+        q = urllib.parse.parse_qs(u.query)
+        g = lambda k: q.get(k, [""])[0]
+        name = urllib.parse.unquote(u.fragment) if u.fragment else u.hostname
+        net = g("type") or "tcp"
+        sec = g("security") or "tls"
+        stream = {"network": net, "security": sec}
+        if sec in ("tls", "xtls", "reality"):
+            stream["tlsSettings"] = {"serverName": g("sni") or g("peer") or u.hostname,
+                                     "fingerprint": g("fp") or "chrome",
+                                     "allowInsecure": g("allowInsecure") in ("1", "true")}
+        if net == "ws":
+            stream["wsSettings"] = {"path": g("path") or "/", "headers": {"Host": g("host")}}
+        elif net == "grpc":
+            stream["grpcSettings"] = {"serviceName": g("serviceName") or g("path")}
+        ob = {"tag": tag, "protocol": "trojan",
+              "settings": {"servers": [{"address": u.hostname, "port": u.port or 443,
+                                        "password": urllib.parse.unquote(u.username or "")}]},
+              "streamSettings": stream}
+        return ob, name
+    except Exception:
+        return None, None
+
+
+def _ss_to_outbound(url, tag="proxy"):
+    """ss:// (SIP002 base64(method:pass)@host:port и легаси base64(всё)) → xray-outbound."""
+    try:
+        raw = url[5:] if url.lower().startswith("ss://") else url
+        frag = ""
+        if "#" in raw:
+            raw, frag = raw.split("#", 1)
+        name = urllib.parse.unquote(frag) if frag else ""
+        if "?" in raw:                              # plugin-параметры — xray так не настроить, отбросим
+            raw = raw.split("?", 1)[0]
+        method = password = host = None
+        port = ""
+        if "@" in raw:                              # SIP002: creds@host:port
+            userinfo, hostpart = raw.rsplit("@", 1)
+            creds = _maybe_b64(userinfo)
+            if ":" in creds:
+                method, password = creds.split(":", 1)
+            host, port = _split_hostport(hostpart)
+        else:                                       # легаси: base64(method:pass@host:port)
+            dec = _maybe_b64(raw)
+            if "@" in dec:
+                creds, hostpart = dec.rsplit("@", 1)
+                if ":" in creds:
+                    method, password = creds.split(":", 1)
+                host, port = _split_hostport(hostpart)
+        if not (method and host and port and str(port).isdigit()):
+            return None, None
+        ob = {"tag": tag, "protocol": "shadowsocks",
+              "settings": {"servers": [{"address": host, "port": int(port),
+                                        "method": method, "password": password}]}}
+        return ob, (name or host)
+    except Exception:
+        return None, None
+
+
+def _vmess_to_outbound(url, tag="proxy"):
+    try:
+        raw = url[8:] if url.lower().startswith("vmess://") else url
+        raw = raw.split("#", 1)[0].strip()
+        v = json.loads(base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "ignore"))
+        host = v.get("add")
+        port = int(v.get("port") or 0)
+        uid = v.get("id")
+        if not (host and port and uid):
+            return None, None
+        name = v.get("ps") or host
+        net = v.get("net") or "tcp"
+        sec = "tls" if str(v.get("tls") or "").lower() in ("tls", "reality") else "none"
+        stream = {"network": net, "security": sec}
+        if sec == "tls":
+            stream["tlsSettings"] = {"serverName": v.get("sni") or v.get("host") or host, "allowInsecure": False}
+        if net == "ws":
+            stream["wsSettings"] = {"path": v.get("path") or "/", "headers": {"Host": v.get("host") or ""}}
+        elif net == "grpc":
+            stream["grpcSettings"] = {"serviceName": v.get("path") or ""}
+        ob = {"tag": tag, "protocol": "vmess",
+              "settings": {"vnext": [{"address": host, "port": port,
+                                      "users": [{"id": uid, "alterId": int(v.get("aid") or 0),
+                                                 "security": v.get("scy") or "auto"}]}]},
+              "streamSettings": stream}
+        return ob, name
+    except Exception:
+        return None, None
+
+
+def _link_to_outbound(url, tag="proxy"):
+    """Любая прокси-ссылка → (xray-outbound, name). Поддержка vless/vmess/trojan/ss
+    (то, что выражается xray-конфигом). hysteria2/tuic/ssr → (None, None)."""
+    scheme = (url.split("://", 1)[0].lower() if "://" in url else "")
+    if scheme == "vless":
+        return _vless_to_outbound(url, tag)
+    if scheme == "trojan":
+        return _trojan_to_outbound(url, tag)
+    if scheme == "ss":
+        return _ss_to_outbound(url, tag)
+    if scheme == "vmess":
+        return _vmess_to_outbound(url, tag)
+    return None, None
+
+
 def _b64list(links):
     return base64.b64encode(("\n".join(_dedup(links))).encode("utf-8")).decode("ascii").encode("ascii")
 
@@ -385,9 +516,12 @@ def _b64list(links):
 def build_merged_response(route, spec, announce=""):
     """Слияние подписок и прямых ключей в один ответ.
        spec = {"subs":[{"url","renames"}], "keys":[{"link","name"}]}.
-    Формат (JSON-конфиги Happ vs base64-список) выбираем ТОЛЬКО по подпискам —
-    протокол ключа не должен «опускать» весь ответ. Переименования применяем после
-    дедупа (гибрид: адрес → имя). Прямые ключи вставляются в выбранном формате."""
+    Если среди источников есть подписка в формате JSON-конфигов Happ («нода» с
+    маршрутизацией/балансировкой) — сохраняем группировку: её конфиги отдаём как есть,
+    а плоские ссылки/ключи оборачиваем каждую в отдельный конфиг (vless/vmess/trojan/ss).
+    Группы НЕ разворачиваем в плоский список (иначе одна «нода» превратилась бы в десятки
+    ссылок). Если JSON-нод нет — отдаём base64-список. Переименования применяем после
+    дедупа (гибрид: адрес → имя)."""
     subs = spec.get("subs", []) if isinstance(spec, dict) else []
     keys = spec.get("keys", []) if isinstance(spec, dict) else []
 
@@ -448,50 +582,32 @@ def build_merged_response(route, spec, announce=""):
     key_links = [_apply_name(k["link"], k.get("name") or "") for k in keys if (k.get("link") or "").strip()]
 
     have_json = bool(json_items)
-    have_text = bool(text_items)
     out_configs = [it["cfg"] for it in json_items]
     out_links = [it["link"] for it in text_items]
+    flat = _dedup(out_links + key_links)
 
-    def _json_payload(configs):
-        h = {"Content-Type": "application/json; charset=utf-8"}
-        h.update(passthrough)
-        return json.dumps(configs, ensure_ascii=False).encode("utf-8"), h
-
-    if have_json and not have_text:
-        # JSON-формат: vless-ключи оборачиваем в конфиги; не-vless обернуть нельзя.
-        for link in key_links:
-            ob, name = _vless_to_outbound(link)
+    if have_json:
+        # Есть хотя бы одна подписка-«нода» (JSON-конфиги Happ) — СОХРАНЯЕМ группировку:
+        # её конфиги отдаём как есть, а плоские ссылки/ключи оборачиваем каждую в свой
+        # конфиг (vless/vmess/trojan/ss). Неконвертируемые в xray (hysteria2/tuic/ssr)
+        # пропускаем с логом — НЕ разворачиваем «ноды» в плоский список ради них.
+        extra, skipped = [], []
+        for link in flat:
+            ob, name = _link_to_outbound(link)
             if ob:
-                out_configs.append(_wrap_as_config(ob, name))
+                extra.append(_wrap_as_config(ob, name))
             else:
-                print(f"[-] прямой ключ ({link[:32]}…) не vless — пропущен в JSON-маршруте", flush=True)
-        payload, out_headers = _json_payload(out_configs)
-    elif have_text and not have_json:
-        payload = _b64list(out_links + key_links)
-        out_headers = {"Content-Type": "text/plain; charset=utf-8"}
-    elif have_json and have_text:
-        # Смешанные подписки: JSON оставляем сгруппированным, плоские vless-ссылки и
-        # ключи оборачиваем в конфиги; если есть не-vless — сводим всё в base64-список.
-        wrapped, leftover = [], []
-        for link in _dedup(out_links + key_links):
-            ob, name = _vless_to_outbound(link)
-            (wrapped if ob else leftover).append((link, ob, name))
-        if not leftover:
-            payload, out_headers = _json_payload(out_configs + [_wrap_as_config(ob, name) for _, ob, name in wrapped])
-        else:
-            all_links = list(out_links + key_links)
-            seen = set(all_links)
-            for it in json_items:
-                for ob, rem in _find_vless_outbounds(it["cfg"]):
-                    link = _vless_from_outbound(ob, rem)
-                    if link and link not in seen:
-                        seen.add(link)
-                        all_links.append(link)
-            payload = _b64list(all_links)
-            out_headers = {"Content-Type": "text/plain; charset=utf-8"}
+                skipped.append(link)
+        if skipped:
+            schemes = _dedup([l.split("://", 1)[0] for l in skipped if "://" in l])
+            print(f"[-] пропущено {len(skipped)} ссыл. неконвертируемого протокола "
+                  f"({', '.join(schemes)}) — группировка JSON-нод сохранена", flush=True)
+        out_headers = {"Content-Type": "application/json; charset=utf-8"}
+        out_headers.update(passthrough)
+        payload = json.dumps(out_configs + extra, ensure_ascii=False).encode("utf-8")
     else:
-        # Подписок нет (или все недоступны) — отдаём только прямые ключи (или пусто).
-        payload = _b64list(key_links)
+        # Только плоские источники/ключи (или ничего) — base64-список ссылок.
+        payload = _b64list(flat)
         out_headers = {"Content-Type": "text/plain; charset=utf-8"}
 
     out_headers.setdefault("Profile-Update-Interval", "12")

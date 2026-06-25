@@ -243,12 +243,36 @@ def t_format():
     names = names_from_json(payload)
     check("JSON содержит и подписку, и ключ", "Srv1" in names and "MyKey" in names, names)
 
-    # JSON-подписка + ss-ключ → остаётся JSON (ss обернуть нельзя — пропущен), формат цел
+    # JSON-подписка + ss-ключ → остаётся JSON, ss оборачивается в конфиг (не теряется)
     spec = {"subs": [{"url": "https://json/sub", "renames": []}],
-            "keys": [{"link": "ss://YWVzOnB3@hs:8388", "name": "SSKey"}]}
+            "keys": [{"link": "ss://YWVzLTI1Ni1nY206cHc@hs:8388", "name": "SSKey"}]}
     payload, h = subs.build_merged_response(route, spec)
     check("JSON-sub + ss-ключ → формат остаётся JSON", "application/json" in h.get("Content-Type", ""))
-    check("не-vless ключ пропущен, подписка не деградировала", names_from_json(payload) == ["Srv1"])
+    check("ss-ключ обёрнут в конфиг (не потерян, группа цела)",
+          names_from_json(payload) == ["Srv1", "SSKey"], names_from_json(payload))
+
+    # JSON-подписка + неконвертируемый ключ (hysteria2) → JSON цел, ключ пропущен (не разворачиваем группу)
+    spec = {"subs": [{"url": "https://json/sub", "renames": []}],
+            "keys": [{"link": "hysteria2://pw@hh:443", "name": "Hy"}]}
+    payload, h = subs.build_merged_response(route, spec)
+    check("hysteria2-ключ пропущен, JSON-группа не развёрнута", names_from_json(payload) == ["Srv1"])
+
+    # РЕАЛЬНЫЙ БАГ: JSON-«нода» (group) + плоский список с ss → группа сохраняется (не взрывается)
+    group = {"remarks": "Европа (Быстрый)", "outbounds": [
+        subs._vless_to_outbound("vless://a@h1:443?type=tcp#n1")[0],
+        subs._vless_to_outbound("vless://b@h2:443?type=tcp#n2")[0],
+        {"protocol": "freedom", "tag": "direct"}]}
+    FAKE["https://group/sub"] = (json.dumps([group]).encode(), {"Content-Type": "application/json"})
+    FAKE["https://flat/sub"] = (b64("vless://c@h3:443#F1\nss://YWVzLTI1Ni1nY206cHc@h4:8388#F2"), {})
+    spec = {"subs": [{"url": "https://group/sub", "renames": []}, {"url": "https://flat/sub", "renames": []}], "keys": []}
+    payload, h = subs.build_merged_response(route, spec)
+    names = names_from_json(payload)
+    check("микс JSON-группы + плоского списка с ss → остаётся JSON", "application/json" in h.get("Content-Type", ""))
+    check("группа НЕ развёрнута в отдельные ссылки (1 группа + 2 плоские)",
+          names == ["Европа (Быстрый)", "F1", "F2"], names)
+    grp = json.loads(payload.decode())[0]
+    check("у группы сохранены её внутренние outbounds (балансер/роутинг)",
+          len(grp.get("outbounds", [])) == 3, len(grp.get("outbounds", [])))
 
     # text-подписка + ключи → base64-список с переименованным #fragment
     spec = {"subs": [{"url": "https://text/sub", "renames": []}],
@@ -286,13 +310,18 @@ def t_rename_match():
     check("неоднозначный addr → имя не тронуто, без падения",
           any(frag(l) == "BrandNewName" for l in links_from_b64(payload)))
 
-    # дедуп конфигов без учёта remarks: два sub'а с одинаковым конфигом, разные имена → один
-    FAKE["https://dupA"] = (json.dumps([json_config("vless://u@hh:443?type=tcp#A")]).encode(), {})
-    FAKE["https://dupB"] = (json.dumps([json_config("vless://u@hh:443?type=tcp#B")]).encode(), {})
+    # дедуп: полностью идентичный конфиг (включая remarks) из двух подписок → один
+    FAKE["https://dupA"] = (json.dumps([json_config("vless://u@hh:443?type=tcp#Same")]).encode(), {})
+    FAKE["https://dupB"] = (json.dumps([json_config("vless://u@hh:443?type=tcp#Same")]).encode(), {})
     spec = {"subs": [{"url": "https://dupA", "renames": []}, {"url": "https://dupB", "renames": []}], "keys": []}
-    payload, h = subs.build_merged_response(route, spec)
-    check("одинаковые конфиги с разными remarks схлопнуты", len(names_from_json(payload)) == 1,
-          names_from_json(payload))
+    check("идентичные конфиги (вкл. remarks) схлопнуты в один",
+          names_from_json(subs.build_merged_response(route, spec)[0]) == ["Same"])
+    # конфиги, отличающиеся ТОЛЬКО именем → разные ноды, сохраняем оба (как у источника)
+    FAKE["https://difA"] = (json.dumps([json_config("vless://u@hh:443?type=tcp#NameA")]).encode(), {})
+    FAKE["https://difB"] = (json.dumps([json_config("vless://u@hh:443?type=tcp#NameB")]).encode(), {})
+    spec = {"subs": [{"url": "https://difA", "renames": []}, {"url": "https://difB", "renames": []}], "keys": []}
+    check("разные имена → обе ноды сохранены",
+          sorted(names_from_json(subs.build_merged_response(route, spec)[0])) == ["NameA", "NameB"])
 
 
 # ── 8. зеркало ─────────────────────────────────────────────────────────────
