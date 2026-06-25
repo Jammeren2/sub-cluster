@@ -377,7 +377,8 @@ class AdminHandler(_Base):
         elif path == "/settings":
             s = STORE.get_settings()
             self._html(200, webui.render_settings(s, CLUSTER.all_nodes(),
-                                                  crypto_ok=secretbox.crypto_ready()))
+                                                  crypto_ok=secretbox.crypto_ready(),
+                                                  sub_port=SUB_PORT, admin_port=ADMIN_PORT))
         else:
             self._respond(404, b"not found")
 
@@ -587,7 +588,8 @@ class AdminHandler(_Base):
 
         if errors:
             self._html(400, webui.render_settings(STORE.get_settings(), CLUSTER.all_nodes(),
-                       flash="; ".join(errors), flash_err=True, crypto_ok=secretbox.crypto_ready()))
+                       flash="; ".join(errors), flash_err=True, crypto_ok=secretbox.crypto_ready(),
+                       sub_port=SUB_PORT, admin_port=ADMIN_PORT))
             return False
 
         def mut(cfg):

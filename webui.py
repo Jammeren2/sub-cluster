@@ -85,17 +85,31 @@ SETTINGS_JS = r"""
 (function(){
   var DOMS = Array.isArray(window.__SDOMAINS__) ? window.__SDOMAINS__.map(function(d){return Object.assign({},d);}) : [];
   var NODES = Array.isArray(window.__SNODES__) ? window.__SNODES__ : [];
+  var SUB_PORT = window.__SUB_PORT__ || 8081;
   var list = document.getElementById('domlist');
   var hidden = document.getElementById('domains_json');
   var form = document.getElementById('setform');
   var addBtn = document.getElementById('addDom');
+  function fqdnOf(d){ var s=(d.subdomain||'').trim().toLowerCase(), z=(d.zone||'').trim().toLowerCase(); return (s&&z)?(s+'.'+z):''; }
+  function coolifyStr(d){ var fq=fqdnOf(d); return fq?('https://'+fq+':'+SUB_PORT):''; }
+  function refreshSummary(){
+    var box=document.getElementById('coolify'); if(!box) return; box.textContent='';
+    var parts=DOMS.filter(function(d){ return d.enabled!==false && fqdnOf(d); }).map(coolifyStr);
+    box.appendChild(el('label',null,'Coolify «Domains» для сервиса (подписки → порт '+SUB_PORT+')'));
+    if(!parts.length){ box.appendChild(el('div','help','Добавь домен с зоной и поддоменом.')); return; }
+    var ta=el('textarea'); ta.readOnly=true; ta.value=parts.join(',\n'); ta.rows=Math.min(6,parts.length); ta.className='mono'; box.appendChild(ta);
+    var copy=el('button','btn small','Копировать'); copy.type='button';
+    copy.addEventListener('click',function(){ if(navigator.clipboard)navigator.clipboard.writeText(parts.join(',')); copy.textContent='Скопировано ✓'; setTimeout(function(){copy.textContent='Копировать';},1500); });
+    box.appendChild(copy);
+    box.appendChild(el('div','help','Вставь в поле «Domains» сервиса app в Coolify (через запятую). Admin-домен узла добавь отдельно к его порту.'));
+  }
   function nodeLabel(id){ var n=NODES.find(function(x){return x.id===id;}); return n?(n.label||n.id):id; }
   function el(tag,cls,txt){ var e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e; }
 
-  function field(label,d,key,ph,mono){
+  function field(label,d,key,ph,mono,cb){
     var w=el('div'); w.appendChild(el('label',null,label));
     var inp=el('input'); inp.value=d[key]||''; inp.placeholder=ph||''; if(mono)inp.className='mono';
-    inp.addEventListener('input',function(){ d[key]=inp.value; });
+    inp.addEventListener('input',function(){ d[key]=inp.value; if(cb)cb(); });
     w.appendChild(inp); return w;
   }
   function pwfield(d){
@@ -143,23 +157,28 @@ SETTINGS_JS = r"""
       var del=el('button','btn small red','Удалить'); del.type='button';
       del.addEventListener('click',function(){ DOMS.splice(i,1); render(); });
       head.appendChild(del); card.appendChild(head);
+      var cf=el('div','help'); cf.style.marginTop='6px';
+      function updCard(){ var c=coolifyStr(d); cf.textContent = c ? ('Coolify: привязать к порту '+SUB_PORT+' → '+c) : ('Coolify: укажи зону и поддомен (порт '+SUB_PORT+')'); refreshSummary(); }
       var g=el('div','grid2'); g.style.marginTop='8px';
-      g.appendChild(field('Зона', d, 'zone', 'example.com', true));
-      g.appendChild(field('Поддомен', d, 'subdomain', 'happ', true));
+      g.appendChild(field('Зона', d, 'zone', 'example.com', true, updCard));
+      g.appendChild(field('Поддомен', d, 'subdomain', 'happ', true, updCard));
       g.appendChild(field('Логин reg.ru', d, 'regru_username', '', false));
       g.appendChild(pwfield(d));
       card.appendChild(g);
+      card.appendChild(cf);
       card.appendChild(field('Публичная база (необязательно)', d, 'public_base', 'https://happ.example.com', true));
       card.appendChild(field('Заметка', d, 'note', '', false));
       var en=el('label','chk'); en.style.marginTop='8px';
       var cb=el('input'); cb.type='checkbox'; cb.checked=d.enabled!==false; cb.style.width='auto';
-      cb.addEventListener('change',function(){ d.enabled=cb.checked; });
+      cb.addEventListener('change',function(){ d.enabled=cb.checked; refreshSummary(); });
       en.appendChild(cb); en.appendChild(el('span',null,'включён')); card.appendChild(en);
       card.appendChild(el('label',null,'Приоритет узлов для этого домена'));
       var np=el('div','npri'); card.appendChild(np); renderNpri(d,np);
       list.appendChild(card);
+      updCard();
     });
     if(!DOMS.length){ list.appendChild(el('div','help','Доменов пока нет — добавь хотя бы один.')); }
+    refreshSummary();
   }
   addBtn.addEventListener('click',function(){
     DOMS.push({id:'',zone:'',subdomain:'',regru_username:'',enabled:true,default:DOMS.length===0,note:'',public_base:'',node_priority:null,has_pw:false});
@@ -466,7 +485,8 @@ Redeploy-вебхук: Coolify — его deploy-webhook (сам делает gi
 
 
 # ── настройки ──────────────────────────────────────────────────────────────
-def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True):
+def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
+                    sub_port=8081, admin_port=8080):
     flash_html = f'<div class="flash {"err" if flash_err else ""}">{esc(flash)}</div>' if flash else ""
     dns = settings.get("dns", {})
     doms = dns.get("domains") or []
@@ -494,9 +514,13 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True):
   <div class="help" style="margin-bottom:10px">Каждый домен фейловерится отдельно: его A-запись
   переписывается на свой активный узел его аккаунтом reg.ru. IP всех узлов должны быть в белом списке
   API в настройках соответствующего аккаунта reg.ru. «Домен по умолчанию» отдаёт маршруты без явно
-  выбранного домена. Admin-домены узлов статичные — reg.ru их не трогает.</div>
+  выбранного домена. Admin-домены узлов статичные — reg.ru их не трогает.
+  <br><b>Coolify/прокси:</b> привяжи КАЖДЫЙ домен подписок к порту подписок
+  <b>{esc(sub_port)}</b> (SUB_PORT), а admin-домен узла — к порту <b>{esc(admin_port)}</b> (ADMIN_PORT).
+  Готовая строка для поля «Domains» — ниже.</div>
   <div id="domlist"></div>
   <button class="btn small" type="button" id="addDom">+ Добавить домен</button>
+  <div id="coolify" style="margin-top:12px"></div>
 </fieldset>
 <fieldset><legend>Фейловер</legend>
   <label class="row"><input type="checkbox" name="failover_enabled" value="1" style="width:auto"{chk(settings.get('failover_enabled'))}> <span>Авто-фейловер включён</span></label>
@@ -511,7 +535,7 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True):
 <input type="hidden" name="domains_json" id="domains_json">
 <button class="btn primary" type="submit">Сохранить настройки</button>
 </form>
-<script>window.__SDOMAINS__={js_embed(domains_ui)};window.__SNODES__={js_embed(nodes_ui)};</script>
+<script>window.__SDOMAINS__={js_embed(domains_ui)};window.__SNODES__={js_embed(nodes_ui)};window.__SUB_PORT__={js_embed(sub_port)};</script>
 <script>{SETTINGS_JS}</script>
 </div></body></html>"""
 

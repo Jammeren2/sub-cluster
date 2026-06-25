@@ -58,7 +58,7 @@
 | `NODE_PUBLIC_IP`  | Публичный IP сервера — он прописывается в DNS **подписок** при фейловере |
 | `NODE_PRIORITY`   | Приоритет (**меньше = важнее**). Активным становится самый живой с наименьшим |
 | `CLUSTER_URL`     | **Свой admin-домен** этого узла (`https://admin2.example.net`) — адрес для пиров |
-| `ADMIN_DOMAIN` / `SUB_DOMAIN` | Для Caddy (standalone): admin-домен узла и домен подписок |
+| `ADMIN_DOMAIN`    | Для Caddy (standalone): admin-домен узла (домены подписок задаются в панели — Caddy ловит их catch-all-блоком). `SUB_DOMAIN` больше не обязателен |
 | `PEERS`           | admin-домены **других** узлов через запятую (бутстрап; дальше синк сам) |
 | `CLUSTER_SECRET`  | Секрет подписи peer-запросов — **одинаковый на всех узлах**         |
 | `SECRET_KEY`      | Ключ шифрования секретов в БД — **одинаковый на всех узлах**        |
@@ -94,9 +94,12 @@ Coolify сам поднимает прокси (Traefik) на 80/443, свой C
    `NODE_PUBLIC_IP`, `NODE_PRIORITY`, **`CLUSTER_URL`** (свой admin-домен,
    `https://admin.example.net`), **`PEERS`** (admin-домены других узлов через
    запятую), `CLUSTER_SECRET`, `SECRET_KEY`, `ADMIN_USER`, `ADMIN_PASSWORD`.
-3. Назначь домены сервису `app`: **свой admin-домен** → порт **8080**,
-   `happ.example.com` → порт **8081** (в Coolify: Domains, или `SERVICE_FQDN_APP_8080`
-   / `SERVICE_FQDN_APP_8081`).
+3. Назначь домены сервису `app`: **свой admin-домен** → порт **8080**, и **каждый
+   домен подписок** → порт **8081** (в Coolify: Domains, или `SERVICE_FQDN_APP_8080`
+   / `SERVICE_FQDN_APP_8081`). В Coolify домен привязывается к порту — поэтому в поле
+   «Domains» пиши с портом: `https://happ.example.com:8081,https://happ2.other.ru:8081`.
+   Готовую строку «Domains» для всех доменов подписок панель показывает в `/settings`
+   (порт берётся из `SUB_PORT`).
 4. Доп-порты наружу открывать **не нужно** — узлы ходят друг к другу через
    admin-домен по 443.
 
