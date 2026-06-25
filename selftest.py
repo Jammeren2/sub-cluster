@@ -661,6 +661,32 @@ def t_find_route_exact_wins():
           got and got["id"] == "ra000000", got)
 
 
+def t_fourth_level_domain():
+    print("\n[27] домены 4-го уровня (многоуровневый поддомен)")
+    enc = lambda s: "enc:" + s
+    parsed, errs = graph.normalize_domains([
+        {"id": "d4", "zone": "example.com", "subdomain": "happ.region", "enabled": True, "default": True},
+        {"id": "d5", "zone": "example.com", "subdomain": "a.b.c", "enabled": True, "default": False},
+    ], {}, enc)
+    check("4-й/5-й уровень принят без ошибок", not errs, errs)
+    check("FQDN 4-го уровня = happ.region.example.com", graph.domain_fqdn(parsed[0]) == "happ.region.example.com")
+    check("FQDN 5-го уровня = a.b.c.example.com", graph.domain_fqdn(parsed[1]) == "a.b.c.example.com")
+    check("_host_norm 4-го уровня с портом",
+          graph._host_norm("Happ.Region.example.com:8081") == "happ.region.example.com")
+    st = new_store()
+    set_domains(st, [
+        {"id": "d4", "zone": "example.com", "subdomain": "happ.region", "enabled": True, "default": True},
+        {"id": "d3", "zone": "example.com", "subdomain": "happ", "enabled": True, "default": False},
+    ])
+    graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "r4000000", "path": "/p", "mode": "merge", "enabled": True, "domain_id": "d4"},
+        {"id": "r3000000", "path": "/p", "mode": "merge", "enabled": True, "domain_id": "d3"}]})
+    check("host 4-го уровня → свой маршрут",
+          (graph.find_route(st, "/p", host="happ.region.example.com") or {}).get("id") == "r4000000")
+    check("host 3-го уровня → свой (не путается с 4-м под той же зоной)",
+          (graph.find_route(st, "/p", host="happ.example.com") or {}).get("id") == "r3000000")
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_migrate_domains, t_migrate_idempotent, t_migrate_deterministic,
@@ -668,7 +694,7 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_find_route_host, t_effective_domain_fallback, t_host_norm,
           t_provider_from_domain, t_normalize_domains, t_merge_failover_per_domain,
           t_failover_oldnode_compat, t_failover_summary_mirror, t_per_domain_active,
-          t_disabled_default_repair, t_find_route_exact_wins):
+          t_disabled_default_repair, t_find_route_exact_wins, t_fourth_level_domain):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")

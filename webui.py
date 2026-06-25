@@ -515,6 +515,9 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
   переписывается на свой активный узел его аккаунтом reg.ru. IP всех узлов должны быть в белом списке
   API в настройках соответствующего аккаунта reg.ru. «Домен по умолчанию» отдаёт маршруты без явно
   выбранного домена. Admin-домены узлов статичные — reg.ru их не трогает.
+  <br><b>Зона</b> — зарегистрированный в reg.ru домен (напр. <code>example.com</code>); <b>поддомен</b>
+  может быть многоуровневым (напр. <code>happ.region</code> → домен 4-го уровня
+  <code>happ.region.example.com</code>). Зону на 3-й уровень дробить не нужно — её ведёт reg.ru.
   <br><b>Coolify/прокси:</b> привяжи КАЖДЫЙ домен подписок к порту подписок
   <b>{esc(sub_port)}</b> (SUB_PORT), а admin-домен узла — к порту <b>{esc(admin_port)}</b> (ADMIN_PORT).
   Готовая строка для поля «Domains» — ниже.</div>
