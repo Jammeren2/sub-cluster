@@ -3,7 +3,13 @@
   const ADMIN = (typeof window.__ADMIN__ === 'string') ? window.__ADMIN__ : '/admin';
   const CSRF = window.__CSRF__ || '';
   const BASE = window.__BASE__ || '';
+  const DOMAINS = Array.isArray(window.__DOMAINS__) ? window.__DOMAINS__ : [];
   G.sources = G.sources || []; G.routes = G.routes || []; G.edges = G.edges || []; G.node_meta = G.node_meta || {};
+
+  function domainById(id){ return DOMAINS.find(d=>d.id===id); }
+  function defaultDomain(){ return DOMAINS.find(d=>d.default && d.enabled) || DOMAINS.find(d=>d.enabled) || DOMAINS[0] || null; }
+  function effDomain(r){ const d=domainById(r.domain_id); return (d && d.enabled) ? d : defaultDomain(); }
+  function baseFor(r){ const d=effDomain(r); return d ? (d.base || ('https://'+(d.fqdn||''))) : (BASE||''); }
 
   const NODE_W = 240, SOCK_Y = 28;
   const editor = document.getElementById('editor');
@@ -228,6 +234,18 @@
     const p=el('input','mono'); p.value=r.path||''; p.placeholder='/custom/custom'; mask(p); bd.appendChild(p);
     bd.appendChild(el('label',null,'Режим'));
     const sel=el('select'); [['merge','Слияние'],['mirror','Зеркало']].forEach(m=>{ const o=el('option',null,m[1]); o.value=m[0]; if((r.mode||'merge')===m[0])o.selected=true; sel.appendChild(o); }); sel.addEventListener('change',()=>{ r.mode=sel.value; markDirty(); }); bd.appendChild(sel);
+    // домен (на каком отдаётся) — показываем, только если домены настроены
+    let domWarn=null;
+    function updWarn(){ if(!domWarn)return; const bad=r.domain_id && !((domainById(r.domain_id)||{}).enabled); domWarn.textContent=bad?'⚠ домен отсутствует/выключен — отдаётся на домене по умолчанию':''; }
+    if(DOMAINS.length){
+      bd.appendChild(el('label',null,'Домен (на каком отдаётся)'));
+      const ds=el('select');
+      const o0=el('option',null,'(по умолчанию)'); o0.value=''; if(!(r.domain_id||''))o0.selected=true; ds.appendChild(o0);
+      DOMAINS.forEach(d=>{ const lbl=(d.fqdn||d.id)+(d.enabled?(d.default?' ★':''):' (выключен)'); const o=el('option',null,lbl); o.value=d.id; if((r.domain_id||'')===d.id)o.selected=true; ds.appendChild(o); });
+      ds.addEventListener('change',()=>{ r.domain_id=ds.value; updPub(); updWarn(); markDirty(); });
+      bd.appendChild(ds);
+      domWarn=el('div','muted'); domWarn.style.color='#ffb86b'; domWarn.style.fontSize='12px'; bd.appendChild(domWarn);
+    }
     // текст под подпиской (announce — показывается в клиенте)
     const det=el('details'); det.appendChild(el('summary',null,'Текст под подпиской (announce)'));
     const ta=el('textarea'); ta.value=r.announce||''; ta.placeholder='Бот — @mybot\nПоддержка — https://...'; ta.addEventListener('input',()=>{ r.announce=ta.value; markDirty(); }); det.appendChild(ta); bd.appendChild(det);
@@ -239,8 +257,8 @@
     const pub=el('div','pub'); const pubSpan=el('span',null,''); maskSpan(pubSpan);
     const pubCopy=el('span','copy','копировать'); pubCopy.addEventListener('click',()=>{ if(navigator.clipboard)navigator.clipboard.writeText(pubSpan.textContent); showToast('Ссылка скопирована',false); });
     pub.appendChild(pubSpan); pub.appendChild(pubCopy);
-    function updPub(){ r.path=p.value; pubSpan.textContent=BASE.replace(/\/$/,'')+normPath(p.value); }
-    p.addEventListener('input',()=>{ updPub(); markDirty(); }); updPub(); bd.appendChild(pub);
+    function updPub(){ r.path=p.value; pubSpan.textContent=baseFor(r).replace(/\/$/,'')+normPath(p.value); }
+    p.addEventListener('input',()=>{ updPub(); markDirty(); }); updPub(); updWarn(); bd.appendChild(pub);
     const cnt=el('div','cnt'); cnt.dataset.rid=r.id; bd.appendChild(cnt);
     n.appendChild(bd);
     dragHeader(hd,r,n); deleteBtn(x,r);
@@ -268,7 +286,7 @@
   function centerWorld(){ const r=rect(); return {x:(r.width/2-view.panX)/view.zoom, y:(r.height/2-view.panY)/view.zoom}; }
   document.getElementById('addSrc').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'source',x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeSource(s); redrawWires(); markDirty(); });
   document.getElementById('addKey').addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),url:'',label:'',type:'key',keys:[{link:'',name:''}],renames:[],x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeKey(s); redrawWires(); markDirty(); });
-  document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
+  document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',domain_id:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
   document.getElementById('save').addEventListener('click',()=>save(false));
 
@@ -300,7 +318,7 @@
     });
     const payload={
       sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',type:s.type||'source',x:Math.round(s.x),y:Math.round(s.y)})),
-      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,announce:r.announce||'',x:Math.round(r.x),y:Math.round(r.y)})),
+      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,announce:r.announce||'',domain_id:r.domain_id||'',x:Math.round(r.x),y:Math.round(r.y)})),
       edges:G.edges.map(e=>({from:e.from,to:e.to})),
       node_meta:node_meta
     };

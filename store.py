@@ -43,22 +43,29 @@ DEFAULT_CONFIG = {
         "sub_public_base": "",    # для показа готовых ссылок (напр. https://happ.example.com)
         "dns": {
             "provider": "regru",
+            # Легаси-поля одного домена (миграция → domains[0]; зеркало дефолтного
+            # домена для старых узлов в смешанном кластере). Не удаляем.
             "regru_username": "",
             "regru_password_enc": "",   # шифр (secretbox)
-            # Фейловерится только домен подписок; admin-домены статичные у каждого узла.
             "sub": {"zone": "example.com", "subdomain": "happ"},
+            # Несколько доменов подписок, у каждого свой аккаунт reg.ru. Каждый
+            # фейловерится отдельно (на свой активный узел). См. graph.domain_*.
+            "domains": [],
         },
     },
 }
 
 DEFAULT_FAILOVER = {
-    "active": None,       # id узла, на который сейчас указывает DNS
-    "pinned": None,       # id узла, закреплённого вручную (или None = авто)
+    # Верхнеуровневая сводка = зеркало ДЕФОЛТНОГО домена (для старых узлов и UI).
+    "active": None,       # id узла, на который указывает DNS дефолтного домена
+    "pinned": None,       # id узла, закреплённого вручную глобально (или None = авто)
     "pinned_ts": 0.0,     # штамп изменения pinned (для слияния)
-    "last_ts": 0.0,       # время последнего переключения DNS
-    "dns_ip": None,       # IP, установленный в DNS
-    "history": [],        # последние события [{ts, node, ip, by, ok, msg}]
-    "fail_counts": {},    # node_id -> [подряд неудач применить DNS, ts]
+    "last_ts": 0.0,       # время последнего переключения DNS дефолтного домена
+    "dns_ip": None,       # IP, установленный в DNS дефолтного домена
+    "history": [],        # последние события [{ts, domain, node, ip, by, ok, msg}]
+    "fail_counts": {},    # node_id -> [подряд неудач применить DNS, ts] (дефолтный домен)
+    # Состояние на каждый домен подписок (фейловер per-domain).
+    "domains": {},        # domain_id -> {active, dns_ip, last_ts, fail_counts:{node:[n,ts]}}
 }
 
 # Участники кластера — отдельный документ с поэлементным (CRDT-подобным) слиянием:
@@ -205,6 +212,8 @@ class Store:
         # гарантируем вложенный dns
         dns = dict(DEFAULT_CONFIG["settings"]["dns"])
         dns.update((cfg.get("settings") or {}).get("dns") or {})
+        if not isinstance(dns.get("domains"), list):
+            dns["domains"] = []
         s["dns"] = dns
         return s
 
@@ -212,42 +221,102 @@ class Store:
         fo = self.get("failover") or {}
         out = dict(DEFAULT_FAILOVER)
         out.update(fo)
+        if not isinstance(out.get("domains"), dict):
+            out["domains"] = {}
         return out
+
+    def get_domain_failover(self, fo, domain_id):
+        """Срез оперативного состояния одного домена (active/dns_ip/last_ts/fail_counts)."""
+        d = (fo.get("domains") or {}).get(domain_id)
+        if not isinstance(d, dict):
+            return {"active": None, "dns_ip": None, "last_ts": 0.0, "fail_counts": {}}
+        return {"active": d.get("active"), "dns_ip": d.get("dns_ip"),
+                "last_ts": float(d.get("last_ts", 0)), "fail_counts": d.get("fail_counts") or {}}
+
+    def default_domain_id(self):
+        """id дефолтного домена (явный флаг default, иначе первый). Инлайн — store
+        не импортирует graph, чтобы остаться без зависимостей в merge_failover."""
+        doms = ((self.get_settings().get("dns") or {}).get("domains")) or []
+        for d in doms:
+            if isinstance(d, dict) and d.get("default"):
+                return d.get("id")
+        return doms[0].get("id") if doms and isinstance(doms[0], dict) else None
 
     def update_failover(self, mutator):
         return self.update("failover", mutator)
 
     def merge_failover(self, remote_meta):
-        """Поэлементное слияние failover, чтобы конкурентные записи active/dns_ip
-        (с активного узла) и pinned/history (с другого) не затирали друг друга.
-        - active/dns_ip/last_ts — берём с большим last_ts (свежее реальное переключение);
+        """Поэлементное слияние failover, чтобы конкурентные записи разных узлов
+        (и разных доменов) не затирали друг друга:
+        - domains[did] — поэлементно по своему last_ts (per-domain переключения);
+        - старый узел (без domains, только плоские поля) — вливаем во ВКЛАД дефолтного
+          домена, если свежее (смешанный кластер во время раскатки);
+        - верхнеуровневая сводка active/dns_ip/last_ts — по верхнему last_ts;
         - pinned — по своему штампу pinned_ts;
-        - history — объединяем по (ts,node), новейшие сверху, до 20;
-        - fail_counts — берём бóльшие счётчики (свежесть по ts)."""
+        - history — объединяем по (ts,node,domain), новейшие сверху, до 20.
+        Инвариант (как у node_meta): старый узел мутирует только известные поля и
+        НИКОГДА не удаляет domains, поэтому per-domain записи новых узлов выживают."""
         if not remote_meta or "data" not in remote_meta:
             return False
         rd = remote_meta["data"] or {}
         with self._lock:
             m = self.get_meta("failover")
             local = m["data"] if m else dict(DEFAULT_FAILOVER)
+            local.setdefault("domains", {})
             changed = False
+
+            # per-domain поэлементно — каждый домен по своему last_ts
+            for did, rdom in (rd.get("domains") or {}).items():
+                if not isinstance(rdom, dict):
+                    continue
+                ldom = local["domains"].get(did)
+                l_ts = float(ldom.get("last_ts", 0)) if isinstance(ldom, dict) else -1.0
+                if float(rdom.get("last_ts", 0)) > l_ts:
+                    local["domains"][did] = {
+                        "active": rdom.get("active"), "dns_ip": rdom.get("dns_ip"),
+                        "last_ts": float(rdom.get("last_ts", 0)),
+                        "fail_counts": rdom.get("fail_counts") or {},
+                    }
+                    changed = True
+
+            # back-compat: старый узел шлёт только плоские поля (нет domains).
+            # Вливаем его состояние в срез ДЕФОЛТНОГО домена, если свежее.
+            if not rd.get("domains") and (rd.get("active") is not None or float(rd.get("last_ts", 0)) > 0):
+                did = self.default_domain_id()
+                if did:
+                    ldom = local["domains"].get(did)
+                    l_ts = float(ldom.get("last_ts", 0)) if isinstance(ldom, dict) else -1.0
+                    if float(rd.get("last_ts", 0)) > l_ts:
+                        local["domains"][did] = {
+                            "active": rd.get("active"), "dns_ip": rd.get("dns_ip"),
+                            "last_ts": float(rd.get("last_ts", 0)),
+                            "fail_counts": rd.get("fail_counts") or {},
+                        }
+                        changed = True
+
+            # верхнеуровневая сводка (дефолтный домен / старые узлы)
             if float(rd.get("last_ts", 0)) > float(local.get("last_ts", 0)):
                 local["active"] = rd.get("active")
                 local["dns_ip"] = rd.get("dns_ip")
                 local["last_ts"] = float(rd.get("last_ts", 0))
                 local["fail_counts"] = rd.get("fail_counts", local.get("fail_counts", {}))
                 changed = True
+
             if float(rd.get("pinned_ts", 0)) > float(local.get("pinned_ts", 0)):
                 local["pinned"] = rd.get("pinned")
                 local["pinned_ts"] = float(rd.get("pinned_ts", 0))
                 changed = True
-            merged = {(h.get("ts"), h.get("node")): h for h in local.get("history", [])}
+
+            def hk(h):
+                return (h.get("ts"), h.get("node"), h.get("domain"))
+            merged = {hk(h): h for h in local.get("history", [])}
             for h in rd.get("history", []):
-                merged.setdefault((h.get("ts"), h.get("node")), h)
+                merged.setdefault(hk(h), h)
             newhist = sorted(merged.values(), key=lambda h: h.get("ts", 0), reverse=True)[:20]
             if newhist != local.get("history", []):
                 local["history"] = newhist
                 changed = True
+
             if changed:
                 nv = self._next_version("failover", m["version"] if m else 0)
                 self._write("failover", local, nv, time.time(), self.origin)

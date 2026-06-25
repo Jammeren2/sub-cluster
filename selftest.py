@@ -19,6 +19,8 @@ os.environ.setdefault("CLUSTER_SECRET", "x")
 import store as storemod          # noqa: E402
 import graph                      # noqa: E402
 import subscriptions as subs      # noqa: E402
+import dns_providers              # noqa: E402
+import cluster as clustermod      # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -351,8 +353,322 @@ def t_preview():
     check("preview text: имя+addr", rows and rows[0]["name"] == "Srv2" and rows[0]["addr"] == "host2:443", rows)
 
 
+# ── мультидомен: миграция, host-aware, per-domain фейловер ─────────────────
+def set_domains(st, domains, **extra):
+    def mut(cfg):
+        s = cfg.setdefault("settings", {})
+        dns = s.setdefault("dns", {})
+        dns["domains"] = domains
+        for k, v in extra.items():
+            s[k] = v
+    st.update_config(mut)
+
+
+def t_migrate_domains():
+    print("\n[10] миграция легаси-домена → domains[0]")
+    st = new_store()
+
+    def seed(cfg):
+        s = cfg.setdefault("settings", {})
+        dns = s.setdefault("dns", {})
+        dns["sub"] = {"zone": "z.ru", "subdomain": "hh"}
+        dns["regru_username"] = "user1"
+        dns["regru_password_enc"] = "enc:xxx"
+        s["sub_public_base"] = "https://hh.z.ru"
+        dns["domains"] = []
+    st.update_config(seed)
+    graph.migrate_config(st)
+    doms = (st.get_settings().get("dns") or {}).get("domains")
+    check("один домен создан", len(doms) == 1, doms)
+    d = doms[0]
+    check("id = 'default'", d["id"] == "default", d)
+    check("default = True", d["default"] is True)
+    check("зона/поддомен перенесены", d["zone"] == "z.ru" and d["subdomain"] == "hh", d)
+    check("логин/пароль reg.ru перенесены",
+          d["regru_username"] == "user1" and d["regru_password_enc"] == "enc:xxx")
+    check("public_base перенесён", d["public_base"] == "https://hh.z.ru", d)
+
+
+def t_migrate_idempotent():
+    print("\n[11] миграция идемпотентна (без бампа версии)")
+    st = new_store()
+    graph.migrate_config(st)
+    v1 = st.get_meta("config")["version"]
+    graph.migrate_config(st)
+    v2 = st.get_meta("config")["version"]
+    check("повторная миграция не бампит версию", v1 == v2, (v1, v2))
+    check("id остаётся 'default'", st.get_settings()["dns"]["domains"][0]["id"] == "default")
+
+
+def t_migrate_deterministic():
+    print("\n[12] миграция детерминирована (узлы сходятся)")
+    stores = []
+    for _ in range(2):
+        st = new_store()
+
+        def seed(cfg):
+            dns = cfg.setdefault("settings", {}).setdefault("dns", {})
+            dns["sub"] = {"zone": "q.ru", "subdomain": "p"}
+            dns["regru_username"] = "u"
+            dns["regru_password_enc"] = "enc:k"
+            dns["domains"] = []
+        st.update_config(seed)
+        graph.migrate_config(st)
+        stores.append(st)
+    da = stores[0].get_settings()["dns"]["domains"][0]
+    db = stores[1].get_settings()["dns"]["domains"][0]
+    check("два узла дают идентичный дефолтный домен", da == db, (da, db))
+
+
+def t_domain_id_carried():
+    print("\n[13] domain_id сохраняется и переживает запись старого узла")
+    st = new_store()
+    set_domains(st, [{"id": "dom_a", "zone": "a.ru", "subdomain": "x", "enabled": True, "default": True}])
+    data = {
+        "sources": [{"id": "s1bbbbbb", "type": "source", "url": "https://json/sub"}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True, "domain_id": "dom_a"}],
+        "edges": [{"from": "s1bbbbbb", "to": "r1cccccc"}],
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    check("domain_id сохранён", get_route(st)["domain_id"] == "dom_a", get_route(st))
+    st.update_config(lambda cfg: cfg.__setitem__("routes", [dict(r) for r in cfg["routes"]]))
+    check("domain_id пережил запись старого узла", get_route(st)["domain_id"] == "dom_a")
+
+
+def t_domain_unknown_blanks():
+    print("\n[14] неизвестный domain_id → ''")
+    st = new_store()
+    set_domains(st, [{"id": "dom_a", "zone": "a.ru", "subdomain": "x", "enabled": True, "default": True}])
+    graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True, "domain_id": "ghost"}]})
+    check("чужой domain_id обнулён", get_route(st)["domain_id"] == "")
+
+
+def t_perdomain_path_uniqueness():
+    print("\n[15] уникальность пути per-domain")
+    st = new_store()
+    set_domains(st, [
+        {"id": "dom_a", "zone": "a.ru", "subdomain": "x", "enabled": True, "default": True},
+        {"id": "dom_b", "zone": "b.ru", "subdomain": "y", "enabled": True, "default": False},
+    ])
+    ok, errs = graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True, "domain_id": "dom_a"},
+        {"id": "r2dddddd", "path": "/x", "mode": "merge", "enabled": True, "domain_id": "dom_b"}]})
+    check("/x на A и /x на B — оба сохраняются", ok, errs)
+    ok2, errs2 = graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True, "domain_id": "dom_a"},
+        {"id": "r2dddddd", "path": "/x", "mode": "merge", "enabled": True, "domain_id": "dom_a"}]})
+    check("/x дважды на одном домене — ошибка", not ok2, errs2)
+
+
+def t_find_route_host():
+    print("\n[16] host-aware find_route")
+    st = new_store()
+    set_domains(st, [
+        {"id": "dom_a", "zone": "a.ru", "subdomain": "x", "enabled": True, "default": True},
+        {"id": "dom_b", "zone": "b.ru", "subdomain": "y", "enabled": True, "default": False},
+    ])
+    graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "ra000000", "path": "/p", "mode": "merge", "enabled": True, "domain_id": "dom_a"},
+        {"id": "rb000000", "path": "/p", "mode": "merge", "enabled": True, "domain_id": "dom_b"}]})
+    check("host A → маршрут A", (graph.find_route(st, "/p", host="x.a.ru") or {}).get("id") == "ra000000")
+    check("host B → маршрут B", (graph.find_route(st, "/p", host="y.b.ru") or {}).get("id") == "rb000000")
+    check("host=None → дефолтный (A)", (graph.find_route(st, "/p", host=None) or {}).get("id") == "ra000000")
+    check("неизвестный host → дефолтный (A)",
+          (graph.find_route(st, "/p", host="1.2.3.4") or {}).get("id") == "ra000000")
+
+
+def t_effective_domain_fallback():
+    print("\n[17] маршрут на выключенном домене → дефолтный")
+    st = new_store()
+    set_domains(st, [
+        {"id": "dom_a", "zone": "a.ru", "subdomain": "x", "enabled": True, "default": True},
+        {"id": "dom_b", "zone": "b.ru", "subdomain": "y", "enabled": False, "default": False},
+    ])
+    graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "rq000000", "path": "/q", "mode": "merge", "enabled": True, "domain_id": "dom_b"}]})
+    settings = st.get_settings()
+    eff = graph.effective_domain(settings, get_route(st, "rq000000"))
+    check("effective_domain выключенного → дефолтный", eff and eff["id"] == "dom_a", eff)
+    check("отдаётся на дефолтном host",
+          (graph.find_route(st, "/q", host="x.a.ru") or {}).get("id") == "rq000000")
+    check("на host выключенного домена не находится", graph.find_route(st, "/q", host="y.b.ru") is None)
+
+
+def t_host_norm():
+    print("\n[18] _host_norm")
+    check("host:port → host, lower", graph._host_norm("Happ.example.com:443") == "happ.example.com")
+    check("IPv6 [::1]:8081 → ::1", graph._host_norm("[::1]:8081") == "::1")
+    check("trailing dot убран", graph._host_norm("x.y.") == "x.y")
+
+
+def t_provider_from_domain():
+    print("\n[19] provider_from_domain")
+    dec = lambda s: s
+    p, err = dns_providers.provider_from_domain({"regru_username": "u", "regru_password_enc": "pw"}, dec)
+    check("с кредами → RegRuProvider", err is None and isinstance(p, dns_providers.RegRuProvider))
+    p2, err2 = dns_providers.provider_from_domain({"regru_username": "", "regru_password_enc": ""}, dec)
+    check("без кредов → ошибка", p2 is None and bool(err2))
+    os.environ["DNS_MOCK"] = "1"
+    try:
+        p3, err3 = dns_providers.provider_from_domain({}, dec)
+        check("DNS_MOCK=1 → MockProvider", err3 is None and isinstance(p3, dns_providers.MockProvider))
+    finally:
+        os.environ.pop("DNS_MOCK", None)
+
+
+def t_normalize_domains():
+    print("\n[20] normalize_domains: валидация")
+    enc = lambda s: "enc:" + s
+    # дубль FQDN
+    parsed, errs = graph.normalize_domains(
+        [{"id": "a", "zone": "z.ru", "subdomain": "h"}, {"id": "b", "zone": "z.ru", "subdomain": "h"}], {}, enc)
+    check("дубль FQDN отклонён", any("FQDN" in e for e in errs), errs)
+    # включённый без поддомена
+    _, errs2 = graph.normalize_domains([{"id": "a", "zone": "z.ru", "subdomain": "", "enabled": True}], {}, enc)
+    check("включённый без поддомена — ошибка", bool(errs2), errs2)
+    # ноль default → первый назначается
+    parsed3, _ = graph.normalize_domains(
+        [{"id": "a", "zone": "z.ru", "subdomain": "h"}, {"id": "b", "zone": "z.ru", "subdomain": "g"}], {}, enc)
+    check("ноль default → первый default", parsed3[0]["default"] and not parsed3[1]["default"], parsed3)
+    # >1 default → остаётся первый
+    parsed4, _ = graph.normalize_domains(
+        [{"id": "a", "zone": "z.ru", "subdomain": "h", "default": True},
+         {"id": "b", "zone": "z.ru", "subdomain": "g", "default": True}], {}, enc)
+    check(">1 default → только первый", parsed4[0]["default"] and not parsed4[1]["default"], parsed4)
+    # пустой пароль → сохраняется прежний по id
+    parsed5, _ = graph.normalize_domains([{"id": "a", "zone": "z.ru", "subdomain": "h"}],
+                                         {"a": {"regru_password_enc": "enc:old"}}, enc)
+    check("пустой пароль → прежний сохранён", parsed5[0]["regru_password_enc"] == "enc:old")
+    # новый пароль шифруется
+    parsed6, _ = graph.normalize_domains([{"id": "a", "zone": "z.ru", "subdomain": "h", "regru_password": "new"}], {}, enc)
+    check("новый пароль зашифрован", parsed6[0]["regru_password_enc"] == "enc:new")
+
+
+def t_merge_failover_per_domain():
+    print("\n[21] merge_failover поэлементно по доменам")
+    st = new_store()
+    st.update_failover(lambda fo: fo.setdefault("domains", {}).__setitem__(
+        "A", {"active": "n1", "dns_ip": "1.1.1.1", "last_ts": 10.0, "fail_counts": {}}))
+    st.merge_failover({"data": {"domains": {"B": {"active": "n2", "dns_ip": "2.2.2.2", "last_ts": 5.0}}}})
+    fo = st.get_failover()
+    check("домен A не тронут", fo["domains"]["A"]["active"] == "n1")
+    check("домен B добавлен", fo["domains"]["B"]["active"] == "n2")
+    st.merge_failover({"data": {"domains": {"B": {"active": "n3", "dns_ip": "3.3.3.3", "last_ts": 20.0}}}})
+    check("свежий B (last_ts 20) переопределяет", st.get_failover()["domains"]["B"]["active"] == "n3")
+    st.merge_failover({"data": {"domains": {"B": {"active": "nX", "last_ts": 3.0}}}})
+    check("устаревший B (last_ts 3) игнорируется", st.get_failover()["domains"]["B"]["active"] == "n3")
+
+
+def t_failover_oldnode_compat():
+    print("\n[22] back-compat failover со старым узлом")
+    st = new_store()
+    set_domains(st, [{"id": "default", "zone": "z.ru", "subdomain": "s", "enabled": True, "default": True}])
+    st.merge_failover({"data": {"active": "nX", "dns_ip": "9.9.9.9", "last_ts": 100.0}})
+    fo = st.get_failover()
+    check("плоское состояние влито в дефолтный домен", fo["domains"].get("default", {}).get("active") == "nX")
+    check("верхнеуровневая сводка обновлена", fo["active"] == "nX")
+    st2 = new_store()
+    st2.merge_failover({"data": {"domains": {"d1": {"active": "n5", "last_ts": 7.0}}}})
+    check("новый формат влит в стартовый старый док без падений",
+          st2.get_failover()["domains"]["d1"]["active"] == "n5")
+
+
+def t_failover_summary_mirror():
+    print("\n[23] _record_failover: зеркало сводки только для дефолта")
+    st = new_store()
+    cl = clustermod.Cluster(st, identity={"id": "n1", "public_ip": "10.0.0.1", "secret": "x"})
+    cl._record_failover("default", True, "n1", "10.0.0.1", "manual", True, "ok")
+    fo = st.get_failover()
+    check("дефолтный домен active", fo["domains"]["default"]["active"] == "n1")
+    check("верхнеуровневый active зеркалится", fo["active"] == "n1")
+    cl._record_failover("dom_b", False, "n2", "10.0.0.2", "manual", True, "ok")
+    fo = st.get_failover()
+    check("недефолтный домен active", fo["domains"]["dom_b"]["active"] == "n2")
+    check("верхнеуровневый active НЕ изменён недефолтным", fo["active"] == "n1")
+
+
+def t_per_domain_active():
+    print("\n[24] per-domain активный по node_priority + seize (mock DNS)")
+    os.environ["DNS_MOCK"] = "1"
+    try:
+        st = new_store()
+        set_domains(st, [{"id": "dA", "zone": "a.ru", "subdomain": "x", "enabled": True,
+                          "default": True, "node_priority": ["n2"],
+                          "regru_username": "u", "regru_password_enc": "e"}])
+        cl = clustermod.Cluster(st, identity={"id": "n1", "public_ip": "10.0.0.1", "secret": "x"})
+        nodes = [{"id": "n1", "priority": 1}, {"id": "n2", "priority": 2}]
+        domain = graph.enabled_domains(st.get_settings())[0]
+        check("node_priority выводит n2 вперёд n1",
+              cl.best_alive_for_domain(domain, nodes, {"n1", "n2"}) == "n2")
+        check("n2 мёртв → откат на глобальный (n1)",
+              cl.best_alive_for_domain(domain, nodes, {"n1"}) == "n1")
+        ok = cl.seize_domain(domain, True, by="auto")
+        check("seize_domain mock ok", ok)
+        fo = st.get_failover()
+        check("домен dA: active = self (n1)", fo["domains"]["dA"]["active"] == "n1")
+        check("сводка зеркалит дефолтный домен", fo["active"] == "n1")
+    finally:
+        os.environ.pop("DNS_MOCK", None)
+
+
+def t_disabled_default_repair():
+    print("\n[25] дефолтный домен всегда включённый")
+    enc = lambda s: "enc:" + s
+    # админ пометил выключенный домен дефолтным → default переносится на включённый
+    parsed, _ = graph.normalize_domains([
+        {"id": "a", "zone": "a.ru", "subdomain": "x", "enabled": False, "default": True},
+        {"id": "b", "zone": "b.ru", "subdomain": "y", "enabled": True, "default": False},
+    ], {}, enc)
+    check("default перенесён на включённый домен",
+          next(d for d in parsed if d["default"])["id"] == "b", parsed)
+    check("выключенный домен не default", not parsed[0]["default"])
+    # default_domain игнорирует выключенный помеченный default (защита от старых данных)
+    st = new_store()
+    set_domains(st, [
+        {"id": "a", "zone": "a.ru", "subdomain": "x", "enabled": False, "default": True},
+        {"id": "b", "zone": "b.ru", "subdomain": "y", "enabled": True, "default": False},
+    ])
+    dd = graph.default_domain(st.get_settings())
+    check("default_domain возвращает включённый (b)", dd and dd["id"] == "b", dd)
+    graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "r0000000", "path": "/p", "mode": "merge", "enabled": True, "domain_id": ""}]})
+    check("маршрут без домена отдаётся на включённом дефолте (host b)",
+          (graph.find_route(st, "/p", host="y.b.ru") or {}).get("id") == "r0000000")
+    check("на host выключенного помеченного-дефолта (a) — ничего",
+          graph.find_route(st, "/p", host="x.a.ru") is None)
+
+
+def t_find_route_exact_wins():
+    print("\n[26] точный домен маршрута приоритетнее осиротевшего")
+    st = new_store()
+    set_domains(st, [
+        {"id": "dom_a", "zone": "a.ru", "subdomain": "x", "enabled": True, "default": True},
+        {"id": "dom_b", "zone": "b.ru", "subdomain": "y", "enabled": True, "default": False},
+    ])
+    # rb записан ПЕРВЫМ, ra вторым — порядок не должен решать исход
+    graph.save_graph(st, {"sources": [], "edges": [], "routes": [
+        {"id": "rb000000", "path": "/p", "mode": "merge", "enabled": True, "domain_id": "dom_b"},
+        {"id": "ra000000", "path": "/p", "mode": "merge", "enabled": True, "domain_id": "dom_a"}]})
+    # выключаем dom_b → rb «осиротел» и падает в дефолт dom_a, где уже есть ra
+    set_domains(st, [
+        {"id": "dom_a", "zone": "a.ru", "subdomain": "x", "enabled": True, "default": True},
+        {"id": "dom_b", "zone": "b.ru", "subdomain": "y", "enabled": False, "default": False},
+    ])
+    got = graph.find_route(st, "/p", host="x.a.ru")
+    check("точный dom_a выигрывает у осиротевшего dom_b (детерминированно)",
+          got and got["id"] == "ra000000", got)
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
-          t_resolve, t_format, t_rename_match, t_mirror, t_preview):
+          t_resolve, t_format, t_rename_match, t_mirror, t_preview,
+          t_migrate_domains, t_migrate_idempotent, t_migrate_deterministic,
+          t_domain_id_carried, t_domain_unknown_blanks, t_perdomain_path_uniqueness,
+          t_find_route_host, t_effective_domain_fallback, t_host_norm,
+          t_provider_from_domain, t_normalize_domains, t_merge_failover_per_domain,
+          t_failover_oldnode_compat, t_failover_summary_mirror, t_per_domain_active,
+          t_disabled_default_repair, t_find_route_exact_wins):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")

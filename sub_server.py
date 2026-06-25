@@ -165,7 +165,8 @@ def _safe_outbound_url(url):
 
 def allowed_tls_domains():
     """FQDN'ы, для которых разрешаем выдачу сертификатов (on-demand TLS Caddy):
-    собственный admin-домен этого узла (из CLUSTER_URL/env ADMIN_DOMAIN) и домен подписок."""
+    собственный admin-домен этого узла (из CLUSTER_URL/env ADMIN_DOMAIN) и FQDN всех
+    включённых доменов подписок (+ их public_base)."""
     s = STORE.get_settings()
     out = set()
     # собственный admin-домен узла
@@ -173,10 +174,18 @@ def allowed_tls_domains():
         h = _host_of(src)
         if h:
             out.add(h)
-    # домен подписок (фейловерный)
-    d = (s.get("dns") or {}).get("sub") or {}
-    if d.get("subdomain") and d.get("zone"):
-        out.add(f"{d['subdomain']}.{d['zone']}".lower())
+    # все включённые домены подписок (фейловерные)
+    for d in graph.enabled_domains(s):
+        fq = graph.domain_fqdn(d)
+        if fq:
+            out.add(fq)
+        h = _host_of(d.get("public_base") or "")
+        if h:
+            out.add(h)
+    # легаси-фолбэк (до миграции)
+    leg = (s.get("dns") or {}).get("sub") or {}
+    if leg.get("subdomain") and leg.get("zone"):
+        out.add(f"{leg['subdomain']}.{leg['zone']}".lower())
     h = _host_of(s.get("sub_public_base") or "")
     if h:
         out.add(h)
@@ -184,7 +193,11 @@ def allowed_tls_domains():
 
 
 def sub_public_base():
+    """Публичная база ссылок ДЕФОЛТНОГО домена (для общих ссылок в UI)."""
     s = STORE.get_settings()
+    base = graph.domain_public_base(graph.default_domain(s) or {})
+    if base:
+        return base
     base = (s.get("sub_public_base") or "").strip()
     if base:
         return base.rstrip("/")
@@ -192,6 +205,14 @@ def sub_public_base():
     if d.get("subdomain") and d.get("zone"):
         return f"https://{d['subdomain']}.{d['zone']}"
     return ""
+
+
+def domains_for_ui():
+    """Слим-список доменов для редактора/классики: id, fqdn, base, enabled, default."""
+    s = STORE.get_settings()
+    return [{"id": d.get("id"), "fqdn": graph.domain_fqdn(d) or (d.get("id") or ""),
+             "base": graph.domain_public_base(d), "enabled": d.get("enabled", True),
+             "default": bool(d.get("default"))} for d in graph.domain_list(s)]
 
 
 # ── базовый обработчик ─────────────────────────────────────────────────────
@@ -207,6 +228,11 @@ class _Base(BaseHTTPRequestHandler):
         if xff:
             return xff.split(",")[0].strip()
         return self.headers.get("X-Real-IP") or self.client_address[0]
+
+    def _req_host(self):
+        """Запрошенный хост (для host-aware маршрутизации по домену подписок)."""
+        h = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
+        return h.split(",")[0].strip()
 
     def _respond(self, code, body=b"", headers=None):
         if isinstance(body, str):
@@ -338,9 +364,11 @@ class AdminHandler(_Base):
             self._html(200, webui.render_login())
             return
         if path == "/":
-            self._html(200, webui.render_editor(graph.get_graph(STORE), sub_public_base(), sess["csrf"]))
+            self._html(200, webui.render_editor(graph.get_graph(STORE), sub_public_base(),
+                                                sess["csrf"], domains=domains_for_ui()))
         elif path == "/classic":
-            self._html(200, webui.render_classic(graph.get_routes(STORE), sub_public_base()))
+            self._html(200, webui.render_classic(graph.get_routes(STORE), sub_public_base(),
+                                                 domains=domains_for_ui()))
         elif path == "/cluster":
             self._html(200, webui.render_cluster(CLUSTER.status(), sub_public_base()))
         elif path == "/stats":
@@ -348,9 +376,8 @@ class AdminHandler(_Base):
                                                CLUSTER.id, sub_public_base()))
         elif path == "/settings":
             s = STORE.get_settings()
-            has_pw = bool((s.get("dns") or {}).get("regru_password_enc"))
-            self._html(200, webui.render_settings(s, sub_public_base(),
-                                                  crypto_ok=secretbox.crypto_ready(), has_regru_pw=has_pw))
+            self._html(200, webui.render_settings(s, CLUSTER.all_nodes(),
+                                                  crypto_ok=secretbox.crypto_ready()))
         else:
             self._respond(404, b"not found")
 
@@ -435,14 +462,16 @@ class AdminHandler(_Base):
         if path == "/routes/create":
             form = self._read_form()
             p = form.get("path", [""])[0].strip()
-            err = graph.validate_route_path(STORE, p)
+            did = form.get("domain_id", [""])[0].strip()
+            err = graph.validate_route_path(STORE, p, domain_id=did)
             if err:
-                self._html(400, webui.render_classic(graph.get_routes(STORE), sub_public_base(), err, True))
+                self._html(400, webui.render_classic(graph.get_routes(STORE), sub_public_base(),
+                                                     err, True, domains=domains_for_ui()))
                 return
             graph.add_route(STORE, p, form.get("title", [""])[0].strip(),
                             graph.parse_upstreams(form.get("upstreams", [""])[0]),
                             form.get("mode", ["merge"])[0].strip(),
-                            announce=form.get("announce", [""])[0])
+                            announce=form.get("announce", [""])[0], domain_id=did)
             self._redirect("/classic")
             return
 
@@ -455,15 +484,17 @@ class AdminHandler(_Base):
                 return
             form = self._read_form()
             p = form.get("path", [""])[0].strip()
-            err = graph.validate_route_path(STORE, p, ignore_id=rid)
+            did = form.get("domain_id", [""])[0].strip()
+            err = graph.validate_route_path(STORE, p, ignore_id=rid, domain_id=did)
             if err:
-                self._html(400, webui.render_classic(graph.get_routes(STORE), sub_public_base(), err, True))
+                self._html(400, webui.render_classic(graph.get_routes(STORE), sub_public_base(),
+                                                     err, True, domains=domains_for_ui()))
                 return
             graph.update_route(STORE, rid, path=p, title=form.get("title", [""])[0].strip(),
                                mode=form.get("mode", ["merge"])[0].strip(),
                                upstreams=graph.parse_upstreams(form.get("upstreams", [""])[0]),
                                announce=form.get("announce", [""])[0],
-                               enabled=("enabled" in form))
+                               domain_id=did, enabled=("enabled" in form))
             self._redirect("/classic")
             return
 
@@ -528,8 +559,8 @@ class AdminHandler(_Base):
 
         # ── настройки ──
         if path == "/settings/save":
-            self._save_settings(self._read_form())
-            self._redirect("/settings")
+            if self._save_settings(self._read_form()) is not False:
+                self._redirect("/settings")
             return
 
         self._respond(404, b"not found")
@@ -539,20 +570,39 @@ class AdminHandler(_Base):
                    webui.render_cluster(CLUSTER.status(), sub_public_base(), msg, not ok))
 
     def _save_settings(self, f):
+        """Сохранить настройки. Домены приходят одним JSON-полем domains_json (список
+        объектов домена). Валидируем (дубли FQDN/конфликт зоны), пароль пустой = не
+        менять (по id), ровно один default. → True, либо False (отрендерил ошибку)."""
         def first(name, default=""):
             return f.get(name, [default])[0].strip()
+
+        raw = first("domains_json")
+        try:
+            incoming = json.loads(raw) if raw else []
+        except Exception:
+            incoming = []
+
+        cur = {d.get("id"): d for d in graph.domain_list(STORE.get_settings())}
+        parsed, errors = graph.normalize_domains(incoming, cur, secretbox.encrypt)
+
+        if errors:
+            self._html(400, webui.render_settings(STORE.get_settings(), CLUSTER.all_nodes(),
+                       flash="; ".join(errors), flash_err=True, crypto_ok=secretbox.crypto_ready()))
+            return False
 
         def mut(cfg):
             s = cfg.setdefault("settings", {})
             dns = s.setdefault("dns", {})
-            dns["regru_username"] = first("regru_username")
-            pw = first("regru_password")
-            if pw:  # пустой — не менять
-                dns["regru_password_enc"] = secretbox.encrypt(pw)
+            dns["domains"] = parsed
             dns.setdefault("provider", "regru")
-            # Фейловерится только домен подписок; admin-домены статичные у каждого узла.
-            dns["sub"] = {"zone": first("sub_zone"), "subdomain": first("sub_subdomain")}
-            s["sub_public_base"] = first("sub_public_base")
+            # зеркалим дефолтный домен в легаси-поля (смешанная раскатка со старыми
+            # узлами + миграция без потерь туда-обратно)
+            dflt = next((d for d in parsed if d["default"]), (parsed[0] if parsed else None))
+            if dflt:
+                dns["sub"] = {"zone": dflt["zone"], "subdomain": dflt["subdomain"]}
+                dns["regru_username"] = dflt["regru_username"]
+                dns["regru_password_enc"] = dflt["regru_password_enc"]
+                s["sub_public_base"] = dflt.get("public_base", "")
             s["failover_enabled"] = ("failover_enabled" in f)
             s["require_quorum"] = ("require_quorum" in f)
             s["preempt"] = ("preempt" in f)
@@ -562,6 +612,7 @@ class AdminHandler(_Base):
                 except ValueError:
                     pass
         STORE.update_config(mut)
+        return True
 
 
 # ── sub-сервер (отдача подписок) ───────────────────────────────────────────
@@ -582,7 +633,7 @@ class SubHandler(_Base):
         if raw_path == "/healthz":
             self._respond(200, b"ok")
             return
-        route = graph.find_route(STORE, raw_path)
+        route = graph.find_route(STORE, raw_path, host=self._req_host())
         if route:
             d = self._device()
             print(f"[{self.log_date_time_string()}] DEVICE ip={d['ip']} hwid={d['hwid'] or '-'} "

@@ -27,6 +27,7 @@ import urllib.error
 
 import secretbox
 import dns_providers
+import graph
 
 
 def _build_ssl_context():
@@ -279,30 +280,51 @@ class Cluster:
                     ids.add(nid)
         return ids
 
-    def best_alive(self, nodes, alive, blocked=None):
+    def _domain_priority_order(self, domain, nodes):
+        """Порядок узлов для домена: его node_priority (если задан) впереди, остальные
+        — по глобальному приоритету; без node_priority — целиком глобальный порядок."""
+        np = domain.get("node_priority")
+        if isinstance(np, list) and np:
+            by_id = {n.get("id"): n for n in nodes}
+            ordered = [by_id[i] for i in np if i in by_id]
+            rest = sorted((n for n in nodes if n.get("id") not in set(np)),
+                          key=lambda n: (int(n.get("priority", 100)), str(n.get("id"))))
+            return ordered + rest
+        return sorted(nodes, key=lambda n: (int(n.get("priority", 100)), str(n.get("id"))))
+
+    def best_alive_for_domain(self, domain, nodes, alive, blocked=None):
+        """Первый живой (и не заблокированный) узел в порядке приоритета домена."""
         blocked = blocked or set()
-        cand = [n for n in nodes if n.get("id") in alive and n.get("id") not in blocked]
-        if not cand:
-            # все живые заблокированы (DNS не применяется) — пробуем хоть кого-то
-            cand = [n for n in nodes if n.get("id") in alive]
-        if not cand:
-            return self.id if self._self_enabled() else None
-        cand.sort(key=lambda n: (int(n.get("priority", 100)), str(n.get("id"))))
-        return cand[0]["id"]
+        order = self._domain_priority_order(domain, nodes)
+        for n in order:
+            if n.get("id") in alive and n.get("id") not in blocked:
+                return n.get("id")
+        for n in order:  # все живые заблокированы — пробуем хоть кого-то
+            if n.get("id") in alive:
+                return n.get("id")
+        return self.id if self._self_enabled() else None
 
     def _has_alive_majority(self, nodes, alive):
         total = len(nodes) or 1
         alive_count = sum(1 for n in nodes if n.get("id") in alive)
         return alive_count >= (total // 2 + 1)
 
-    def _blocked_nodes(self, fo, settings):
-        """Узлы, у которых reg.ru-применение DNS подряд падает — временно уступают
-        черёд следующему по приоритету (счётчик протухает, чтобы узел вернулся)."""
+    def _domain_prefers_self(self, domain, nodes, active):
+        """В порядке приоритета домена мы стоим раньше текущего активного (failback)?"""
+        order = [n.get("id") for n in self._domain_priority_order(domain, nodes)]
+        try:
+            return order.index(self.id) < order.index(active)
+        except ValueError:
+            return False
+
+    def _blocked_nodes_fc(self, fail_counts, settings):
+        """Узлы, у которых reg.ru-применение DNS этого домена подряд падает — временно
+        уступают черёд следующему по приоритету (счётчик протухает, чтобы узел вернулся)."""
         limit = int(settings.get("seize_fail_limit", 3))
         window = max(float(settings.get("cooldown", 60)) * 5, 300.0)
         now = time.time()
         blocked = set()
-        for nid, rec in (fo.get("fail_counts") or {}).items():
+        for nid, rec in (fail_counts or {}).items():
             if isinstance(rec, list) and rec[0] >= limit and (now - float(rec[1])) < window:
                 blocked.add(nid)
         return blocked
@@ -323,67 +345,94 @@ class Cluster:
                     agree += 1
         return agree >= majority
 
-    # ── переключение DNS ──────────────────────────────────────────────────
-    def _apply_dns(self, ip):
-        """Переключаем на активный узел ТОЛЬКО домен подписок. Admin-домены у
-        каждого узла свои (статичные) и reg.ru их не трогает."""
-        settings = self.store.get_settings()
-        prov, err = dns_providers.provider_from_settings(settings, secretbox.decrypt)
+    # ── переключение DNS (per-domain) ─────────────────────────────────────
+    def _apply_dns_domain(self, domain, ip):
+        """Переписать A-запись ОДНОГО домена подписок на ip его аккаунтом reg.ru.
+        Admin-домены у каждого узла свои (статичные) и reg.ru их не трогает."""
+        prov, err = dns_providers.provider_from_domain(domain, secretbox.decrypt)
         if err or not prov:
-            return False, (err or "нет DNS-провайдера"), []
-        d = (settings.get("dns") or {}).get("sub") or {}
-        if not d.get("zone") or not d.get("subdomain"):
-            return False, "не настроен домен подписок", []
-        r = prov.set_a_record(d["zone"], d["subdomain"], ip)
-        return bool(r.ok), f"sub:{r.message}", [("sub", bool(r.ok), r.message)]
+            return False, (err or "нет DNS-провайдера")
+        zone = (domain.get("zone") or "").strip()
+        sub = (domain.get("subdomain") or "").strip()
+        if not zone or not sub:
+            return False, "не настроен домен подписок"
+        r = prov.set_a_record(zone, sub, ip)
+        return bool(r.ok), r.message
 
-    def _record_failover(self, node_id, ip, by, ok, msg, pin=None, pin_set=False):
+    def _record_failover(self, domain_id, is_default, node_id, ip, by, ok, msg):
+        """Записать результат переключения домена domain_id. Дефолтный домен
+        дублируем в верхнеуровневую сводку (для старых узлов и UI)."""
         now = time.time()
 
         def mut(fo):
-            # active/dns_ip обновляем ТОЛЬКО при успешной смене DNS, иначе
-            # пометили бы себя активным без реальной записи и не повторяли бы.
+            doms = fo.setdefault("domains", {})
+            d = doms.setdefault(domain_id, {"active": None, "dns_ip": None,
+                                            "last_ts": 0.0, "fail_counts": {}})
+            # active/dns_ip обновляем ТОЛЬКО при успехе — иначе пометили бы себя
+            # активным без реальной записи и не повторяли бы попытку.
             if ok:
-                fo["active"] = node_id
-                fo["dns_ip"] = ip
-            fo["last_ts"] = now
-            # счётчик неудач применить DNS: чтобы вечно-падающий узел уступил черёд
-            fc = fo.setdefault("fail_counts", {})
+                d["active"] = node_id
+                d["dns_ip"] = ip
+            d["last_ts"] = now
+            fc = d.setdefault("fail_counts", {})
             if ok:
                 fc.pop(node_id, None)
             else:
                 rec = fc.get(node_id) if isinstance(fc.get(node_id), list) else [0, 0]
                 fc[node_id] = [rec[0] + 1, now]
-            if pin_set:
-                fo["pinned"] = pin
-                fo["pinned_ts"] = now
+            if is_default:  # зеркало в верхнеуровневую сводку
+                if ok:
+                    fo["active"] = node_id
+                    fo["dns_ip"] = ip
+                fo["last_ts"] = now
+                lfc = fo.setdefault("fail_counts", {})
+                if ok:
+                    lfc.pop(node_id, None)
+                else:
+                    rec = lfc.get(node_id) if isinstance(lfc.get(node_id), list) else [0, 0]
+                    lfc[node_id] = [rec[0] + 1, now]
             hist = fo.setdefault("history", [])
-            hist.insert(0, {"ts": now, "node": node_id, "ip": ip,
-                            "by": by, "ok": ok, "msg": msg})
+            hist.insert(0, {"ts": now, "domain": domain_id, "node": node_id,
+                            "ip": ip, "by": by, "ok": ok, "msg": msg})
             del hist[20:]
         self.store.update_failover(mut)
 
-    def seize(self, by="auto"):
+    def seize_domain(self, domain, is_default, by="auto"):
+        """Взять DNS одного домена на себя (свой public_ip)."""
         if not self.public_ip:
             print("[cluster] не задан NODE_PUBLIC_IP — не могу взять DNS", flush=True)
             return False
-        ok, msg, _ = self._apply_dns(self.public_ip)
-        self._record_failover(self.id, self.public_ip, by, ok, msg)
-        print(f"[cluster] seize by={by} ok={ok} ip={self.public_ip} {msg}", flush=True)
+        ok, msg = self._apply_dns_domain(domain, self.public_ip)
+        self._record_failover(domain["id"], is_default, self.id, self.public_ip, by, ok, msg)
+        print(f"[cluster] seize dom={domain['id']} by={by} ok={ok} ip={self.public_ip} {msg}", flush=True)
         return ok
 
     def set_active_to(self, node_id, by="manual", pin=True):
-        """Ручное переключение DNS на узел node_id."""
+        """Ручное переключение: точим ВСЕ включённые домены на узел node_id и ставим
+        глобальный пин (авто-фейловер сработает, только если закреплённый узел умрёт)."""
         node = self.find_node(node_id)
         if not node:
             return False, "узел не найден"
         ip = node.get("public_ip")
         if not ip:
             return False, "у узла не задан public_ip"
-        ok, msg, _ = self._apply_dns(ip)
-        self._record_failover(node_id, ip, by, ok, msg,
-                              pin=(node_id if pin else None), pin_set=True)
-        return ok, msg
+        settings = self.store.get_settings()
+        doms = graph.enabled_domains(settings)
+        if not doms:
+            return False, "нет настроенных доменов"
+        default_id = (graph.default_domain(settings) or {}).get("id")
+        oks, msgs = [], []
+        for d in doms:
+            ok, msg = self._apply_dns_domain(d, ip)
+            oks.append(ok)
+            self._record_failover(d["id"], d["id"] == default_id, node_id, ip, by, ok, msg)
+            msgs.append(f"{graph.domain_fqdn(d) or d['id']}:{msg}")
+
+        def setpin(fo):
+            fo["pinned"] = node_id if pin else None
+            fo["pinned_ts"] = time.time()
+        self.store.update_failover(setpin)
+        return all(oks), "; ".join(msgs)
 
     def clear_pin(self):
         def mut(fo):
@@ -501,59 +550,75 @@ class Cluster:
         if not self._self_enabled():
             return
 
-        alive = self.alive_ids(nodes, fail_threshold)
-        blocked = self._blocked_nodes(fo, settings)
-        cand = self.best_alive(nodes, alive, blocked)
-        active = fo.get("active")
-        pinned = fo.get("pinned")
-
         if not settings.get("failover_enabled", True):
-            return
-        # без настроенного DNS-провайдера авто-фейловер невозможен — не дёргаем reg.ru
-        _prov, _prov_err = dns_providers.provider_from_settings(settings, secretbox.decrypt)
-        if _prov_err:
-            return
-        desired = pinned if (pinned and pinned in alive) else cand
-        if desired != self.id or active == self.id:
             return
         if not self.public_ip:
             return
 
+        alive = self.alive_ids(nodes, fail_threshold)
+        pinned = fo.get("pinned")
         node_ids = {n.get("id") for n in nodes}
-        active_valid = active is not None and active in node_ids
-        active_alive = active in alive
-        cooldown_ok = time.time() - float(fo.get("last_ts", 0)) >= float(settings.get("cooldown", 60))
+        default_id = (graph.default_domain(settings) or {}).get("id")
+        now = time.time()
+        cooldown = float(settings.get("cooldown", 60))
 
-        if pinned == self.id:
-            # ручной пин на нас — берём DNS себе (без кворума)
-            if cooldown_ok:
-                self.seize(by="auto-pin")
-            return
+        # Каждый включённый домен фейловерится отдельно: считаем его активный узел
+        # (по его node_priority, иначе глобально) и при необходимости берём его DNS.
+        for domain in graph.enabled_domains(settings):
+            if not domain.get("zone") or not domain.get("subdomain"):
+                continue
+            # домен без своих creds — не дёргаем reg.ru (и не копим fail_counts)
+            _p, _err = dns_providers.provider_from_domain(domain, secretbox.decrypt)
+            if _err:
+                continue
+            did = domain["id"]
+            is_default = (did == default_id)
+            dfo = self.store.get_domain_failover(fo, did)
+            blocked = self._blocked_nodes_fc(dfo["fail_counts"], settings)
+            cand = self.best_alive_for_domain(domain, nodes, alive, blocked)
+            active = dfo["active"]
+            desired = pinned if (pinned and pinned in alive) else cand
+            if desired != self.id or active == self.id:
+                continue
+            cooldown_ok = (now - float(dfo["last_ts"])) >= cooldown
+            active_valid = active is not None and active in node_ids
+            active_alive = active in alive
 
-        if not active_valid:
-            # активный не задан/неизвестен — заявляемся. Но кворум обязателен:
-            # меньшинство в разрыве сети не должно перетягивать «ничей» DNS.
-            if len(nodes) > 1 and settings.get("require_quorum", True) \
-                    and not self._has_alive_majority(nodes, alive):
-                return
-            if cooldown_ok:
-                self.seize(by="auto")
-            return
+            if pinned == self.id:
+                # ручной пин на нас — берём DNS себе (без кворума)
+                if cooldown_ok:
+                    self.seize_domain(domain, is_default, by="auto-pin")
+                continue
 
-        if not active_alive:
-            # активный мёртв — фейловер с защитой от split-brain (кворум)
-            if settings.get("require_quorum", True) and not self._quorum_active_dead(active, nodes, alive):
-                return
-            if cooldown_ok:
-                self.seize(by="auto")
-            return
+            if not active_valid:
+                # активный не задан/неизвестен — заявляемся. Кворум обязателен:
+                # меньшинство в разрыве сети не должно перетягивать «ничей» DNS.
+                if len(nodes) > 1 and settings.get("require_quorum", True) \
+                        and not self._has_alive_majority(nodes, alive):
+                    continue
+                if cooldown_ok:
+                    self.seize_domain(domain, is_default, by="auto")
+                continue
 
-        # активный жив, но мы предпочтительнее по приоритету — failback (preempt)
-        if settings.get("preempt", True):
-            active_node = self.find_node(active)
-            active_prio = int(active_node.get("priority", 100)) if active_node else 100
-            if self.priority < active_prio and cooldown_ok:
-                self.seize(by="auto-failback")
+            if not active_alive:
+                # активный мёртв — фейловер с защитой от split-brain (кворум)
+                if settings.get("require_quorum", True) \
+                        and not self._quorum_active_dead(active, nodes, alive):
+                    continue
+                if cooldown_ok:
+                    self.seize_domain(domain, is_default, by="auto")
+                continue
+
+            # активный жив, но мы предпочтительнее по приоритету домена — failback
+            if settings.get("preempt", True):
+                if domain.get("node_priority"):
+                    prefer = self._domain_prefers_self(domain, nodes, active)
+                else:
+                    active_node = self.find_node(active)
+                    active_prio = int(active_node.get("priority", 100)) if active_node else 100
+                    prefer = self.priority < active_prio
+                if prefer and cooldown_ok:
+                    self.seize_domain(domain, is_default, by="auto-failback")
 
     # ── агрегированная статистика по кластеру ─────────────────────────────
     def stats_doc(self):
@@ -667,6 +732,18 @@ class Cluster:
                 "is_active": nid == fo.get("active"),
                 "is_pinned": nid == fo.get("pinned"),
             })
+        default_id = (graph.default_domain(settings) or {}).get("id")
+        dom_rows = []
+        for d in graph.domain_list(settings):
+            dfo = self.store.get_domain_failover(fo, d["id"])
+            dom_rows.append({
+                "id": d["id"], "fqdn": graph.domain_fqdn(d) or d["id"],
+                "enabled": d.get("enabled", True),
+                "is_default": d["id"] == default_id,
+                "active": dfo["active"], "dns_ip": dfo["dns_ip"],
+                "has_creds": bool(d.get("regru_username") and d.get("regru_password_enc")),
+                "node_priority": d.get("node_priority"),
+            })
         return {
             "self_id": self.id,
             "active": fo.get("active"),
@@ -675,6 +752,7 @@ class Cluster:
             "failover_enabled": settings.get("failover_enabled", True),
             "require_quorum": settings.get("require_quorum", True),
             "nodes": out_nodes,
+            "domains": dom_rows,
             "history": fo.get("history", [])[:10],
         }
 

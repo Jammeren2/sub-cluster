@@ -18,6 +18,7 @@ reg.ru REG.API 2.0:
 иначе запросы отклоняются.
 """
 
+import os
 import json
 import urllib.parse
 import urllib.request
@@ -148,7 +149,7 @@ class RegRuProvider(DnsProvider):
 
 
 def provider_from_settings(settings, decrypt_fn):
-    """Строит DnsProvider из settings['dns']. → (provider, error_or_None)."""
+    """Строит DnsProvider из settings['dns'] (легаси один аккаунт). → (provider, error_or_None)."""
     dns = (settings or {}).get("dns") or {}
     prov = dns.get("provider", "regru")
     if prov == "mock":
@@ -160,3 +161,17 @@ def provider_from_settings(settings, decrypt_fn):
             return None, "reg.ru: не заданы логин/пароль"
         return RegRuProvider(user, pwd), None
     return None, f"неизвестный DNS-провайдер: {prov}"
+
+
+def provider_from_domain(domain, decrypt_fn):
+    """Строит reg.ru-провайдер из одного домена settings['dns']['domains'][i].
+    → (provider, error_or_None). DNS_MOCK=1 — хук для тестов (MockProvider)."""
+    if not isinstance(domain, dict):
+        return None, "нет домена"
+    if os.environ.get("DNS_MOCK") == "1":
+        return MockProvider(), None
+    user = (domain.get("regru_username") or "").strip()
+    pwd = decrypt_fn(domain.get("regru_password_enc") or "")
+    if not user or not pwd:
+        return None, "reg.ru: не заданы логин/пароль домена"
+    return RegRuProvider(user, pwd), None
