@@ -50,6 +50,7 @@
         match:{kind:(r.match&&r.match.kind)||'preset', value:(r.match&&r.match.value)||''}, target:r.target||'direct'}));
       s.default_target = (meta.router&&meta.router.default_target) || 'direct';
       s.gparams = Object.assign({}, (meta.router&&meta.router.params)||{});
+      s.gateway = Object.assign({}, (meta.router&&meta.router.gateway)||{});   // серверный режим (gateway)
       s.rules = s.rules||[]; s.gparams = s.gparams||{};
       return;  // роутер не гидрируется как ключ/группа
     }
@@ -428,13 +429,36 @@
     bd.appendChild(el('label',null,'Остальное (по умолчанию) →'));
     const defWrap=el('div'); bd.appendChild(defWrap);
     function renderDefault(){ defWrap.textContent=''; defWrap.appendChild(targetSelect(s, ()=>s.default_target, v=>{ s.default_target=v; })); }
+    // ── серверный режим (gateway): vless-ссылка обслуживается xray НА УЗЛЕ ──
+    s.gateway = s.gateway || {};
+    const gwWrap=el('details','params'); gwWrap.appendChild(el('summary',null,'⚙ Серверный режим (gateway)'));
+    const gchkW=el('label','zchk'); const gchk=el('input'); gchk.type='checkbox'; gchk.style.width='auto'; gchk.checked=!!s.gateway.enabled;
+    gchkW.appendChild(gchk); gchkW.appendChild(el('span',null,' Узел поднимает vless-ws inbound (трафик идёт ЧЕРЕЗ узел)')); gwWrap.appendChild(gchkW);
+    const gwFields=el('div'); gwWrap.appendChild(gwFields);
+    function renderGw(){
+      gwFields.textContent='';
+      if(!gchk.checked) return;
+      gwFields.appendChild(el('label',null,'Домен ссылки (FQDN; пусто = дефолтный домен подписок)'));
+      const di=el('input'); di.className='mono'; di.value=s.gateway.domain||''; di.placeholder='happ.example.com';
+      di.addEventListener('input',()=>{ s.gateway.domain=di.value.trim(); markDirty(); }); gwFields.appendChild(di);
+      gwFields.appendChild(el('div','muted2','zapret-таргеты → DPI-обход на узле, остальное → аплинки. UUID/путь генерируются. Сохрани граф, затем жми «ссылка».'));
+      const linkBox=el('div','mono'); linkBox.style.cssText='word-break:break-all;font-size:11px;margin:6px 0;opacity:.85'; linkBox.textContent='ссылка: (сохрани граф и нажми ниже)'; gwFields.appendChild(linkBox);
+      const cp=el('button','addkey','Получить/копировать ссылку'); cp.type='button'; cp.addEventListener('mousedown',e=>e.stopPropagation());
+      cp.addEventListener('click',e=>{ e.stopPropagation(); fetch('/gateway/status').then(r=>r.json()).then(d=>{
+        if(d&&d.link){ linkBox.textContent=d.link; try{navigator.clipboard.writeText(d.link);}catch(_){} showToast('Ссылка скопирована'); }
+        else showToast((d&&d.reason)||'Ссылка пуста — сохрани граф и задай домен',true);
+      }).catch(()=>showToast('Не удалось получить статус gateway',true)); });
+      gwFields.appendChild(cp);
+    }
+    gchk.addEventListener('change',()=>{ s.gateway.enabled=gchk.checked; renderGw(); markDirty(); });
+    bd.appendChild(gwWrap);
     const cnt=el('div','cnt'); cnt.dataset.rid=s.id; bd.appendChild(cnt);
     n.appendChild(bd);
     dragHeader(hd,s,n); deleteBtn(x,s);
     n.appendChild(inSocket(s)); n.appendChild(outSocket(s));
     nodeEls[s.id]=n; world.appendChild(n);
     s._refreshTargets=()=>{ renderRules(); renderDefault(); };
-    renderRules(); renderDefault();
+    renderRules(); renderDefault(); renderGw();
   }
 
   // ── переименование ссылок внутри подписки ──
@@ -565,6 +589,10 @@
         ['strategy','probe_url','interval','timeout','sampling','domain_strategy'].forEach(k=>{
           if(s.gparams && s.gparams[k]!=null && s.gparams[k]!=='') params[k]=s.gparams[k]; });
         e.router={rules:rules, default_target:s.default_target||'direct', params:params};   // всегда пишем
+        if(s.gateway && s.gateway.enabled){   // серверный режим (gateway): vless-ws на узле
+          e.router.gateway={enabled:true, uuid:s.gateway.uuid||'', path:s.gateway.path||'',
+                            port:parseInt(s.gateway.port,10)||0, domain:s.gateway.domain||''};
+        }
       } else if(s.type==='autoselect'){
         const params={};
         ['strategy','probe_url','interval','timeout','sampling','domain_strategy'].forEach(k=>{

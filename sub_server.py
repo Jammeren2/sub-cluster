@@ -35,6 +35,7 @@ import cluster as clustermod
 import secretbox
 import webui
 import zapret
+import gateway
 
 # ── окружение ──────────────────────────────────────────────────────────────
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
@@ -418,6 +419,8 @@ class AdminHandler(_Base):
         elif path == "/zapret/test/status":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             self._json(200, zapret.test_status(qs.get("cursor", ["0"])[0]))
+        elif path == "/gateway/status":
+            self._json(200, gateway.status(STORE))
         else:
             self._respond(404, b"not found")
 
@@ -461,6 +464,11 @@ class AdminHandler(_Base):
                 self._json(400, {"ok": False, "errors": ["Некорректный JSON"]})
                 return
             ok, errors = graph.save_graph(STORE, data)
+            if ok:
+                try:
+                    gateway.reconcile(STORE)   # серверный gateway: подхватить изменения графа
+                except Exception as e:
+                    print(f"[gateway] reconcile после save: {e}", flush=True)
             self._json(200 if ok else 400, {"ok": ok, "errors": errors})
             return
 
@@ -777,6 +785,10 @@ def main():
     graph.migrate_config(STORE)
     seed_legacy_route()
     CLUSTER.start()
+    try:
+        gateway.reconcile(STORE)   # серверный gateway: поднять xray/nfqws из стора на старте
+    except Exception as e:
+        print(f"[gateway] reconcile на старте: {e}", flush=True)
 
     if ADMIN_PASSWORD in ("", "admin"):
         if os.environ.get("ALLOW_WEAK_ADMIN_PASSWORD") == "1":

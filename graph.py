@@ -10,6 +10,7 @@ graph.py — операции над графом подписок (маршру
 
 import re
 import json
+import uuid
 import secrets
 import urllib.parse
 
@@ -17,6 +18,7 @@ import subscriptions as subs
 from subscriptions import normalize_path
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_UUID_RE = re.compile(r"^[0-9a-fA-F-]{8,40}$")
 
 # Пути, которые нельзя занимать маршрутами (на sub-сервере).
 RESERVED_PATHS = {"/healthz"}
@@ -387,6 +389,25 @@ def _norm_node_meta(raw, id_map, valid_ids):
                 "default_target": _map_target(rt.get("default_target")),
                 "params": subs._norm_balancer_params(rt.get("params")),
             }
+            gw = rt.get("gateway")          # серверный режим (узел-gateway): vless-ws на узле
+            if isinstance(gw, dict) and gw.get("enabled"):
+                uid = str(gw.get("uuid") or "").strip()
+                if not _UUID_RE.match(uid):
+                    uid = str(uuid.uuid4())   # генерируем один раз, дальше сохраняется
+                path = str(gw.get("path") or "").strip() or subs.GATEWAY_WS_PATH
+                if not path.startswith("/"):
+                    path = "/" + path
+                path = re.sub(r"[^A-Za-z0-9_/-]", "", path)[:64] or "/vlessws"
+                try:
+                    port = int(gw.get("port") or 0)
+                except (TypeError, ValueError):
+                    port = 0
+                if not (1 <= port <= 65535):
+                    port = subs.GATEWAY_PORT
+                entry["router"]["gateway"] = {
+                    "enabled": True, "uuid": uid, "path": path, "port": port,
+                    "domain": str(gw.get("domain") or "").strip()[:255],
+                }
         if entry:
             out[nid] = entry
     return out
@@ -733,6 +754,46 @@ def _resolve_proc(proc_node, node_meta, incoming, src_by_id, routes_by_id=None):
     gdef = _node_group(proc_node, node_meta) or {}
     return {"name": proc_node.get("label") or "", "params": gdef.get("params") or {},
             "buckets": gdef.get("buckets") or [], "subs": g_subs, "keys": g_keys}
+
+
+def resolve_gateways(store):
+    """Роутер-ноды в СЕРВЕРНОМ режиме (gateway) → список для рантайма:
+      [{node_id, name, link, config, path, port, uuid, domain}]
+    config — серверный xray-конфиг (vless-ws inbound + routing, см.
+    subscriptions._wrap_as_server_gateway). link — универсальная клиентская ссылка
+    (host = gateway.domain ноды, иначе дефолтный домен подписок). Чистая функция —
+    рантайм (gateway.py) её прогоняет и (пере)запускает xray/nfqws."""
+    cfg = store.get_config() or {}
+    node_meta = cfg.get("node_meta") or {}
+    src_by_id = {s.get("id"): s for s in cfg.get("sources", []) if s.get("id")}
+    routes_by_id = {r.get("id"): r for r in cfg.get("routes", []) if r.get("id")}
+    incoming = {}
+    for e in cfg.get("edges", []):
+        incoming.setdefault(e.get("to"), []).append(e.get("from"))
+    try:
+        settings = store.get_settings()
+    except AttributeError:
+        settings = (cfg.get("settings") or {})
+    dd = default_domain(settings)
+    default_dom = domain_fqdn(dd) if dd else ""
+    out = []
+    for nid, s in src_by_id.items():
+        if not _is_router_node(s, node_meta):
+            continue
+        gw = (_node_router(s, node_meta) or {}).get("gateway")
+        if not (isinstance(gw, dict) and gw.get("enabled")):
+            continue
+        rr = _resolve_router(s, node_meta, incoming, src_by_id, routes_by_id)
+        inbound = {"uuid": gw.get("uuid"), "path": gw.get("path"), "port": gw.get("port")}
+        config = subs._wrap_as_server_gateway(rr["targets"], rr["rules"], rr["default_target"],
+                                              rr["name"] or "gateway", inbound, rr["params"])
+        domain = gw.get("domain") or default_dom
+        link = subs._gateway_link(domain, gw.get("uuid"), gw.get("path"),
+                                  rr["name"] or "gateway") if domain else ""
+        out.append({"node_id": nid, "name": rr["name"], "link": link, "config": config,
+                    "path": gw.get("path"), "port": gw.get("port"), "uuid": gw.get("uuid"),
+                    "domain": domain})
+    return out
 
 
 # ── чтение ────────────────────────────────────────────────────────────────

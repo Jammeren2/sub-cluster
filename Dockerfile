@@ -17,6 +17,9 @@ ARG INSTALL_ZAPRET=0
 # Версия zapret. ВАЖНО: prebuilt-бинарники (nfqws) лежат только в release-тарболе, в git
 # их НЕТ — поэтому ставим из релиза, а не `git clone`. Бинарники статические (musl).
 ARG ZAPRET_VERSION=v72.12
+# xray-core для узла-gateway (vless-ws inbound + server-side routing). В zip — ещё и
+# geoip.dat/geosite.dat (нужны для geosite-правил роутера).
+ARG XRAY_VERSION=v26.3.27
 RUN if [ "$INSTALL_ZAPRET" = "1" ] || [ "$INSTALL_ZAPRET" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends iptables libcap2-bin ca-certificates && \
       rm -rf /var/lib/apt/lists/* && \
@@ -27,11 +30,19 @@ RUN if [ "$INSTALL_ZAPRET" = "1" ] || [ "$INSTALL_ZAPRET" = "true" ]; then \
       for b in /usr/sbin/xtables-nft-multi /usr/sbin/xtables-legacy-multi; do \
         [ -e "$b" ] && setcap cap_net_admin,cap_net_raw+ep "$b" || true ; \
       done && \
-      chmod -R a+rX /opt/zapret ; \
+      chmod -R a+rX /opt/zapret && \
+      mkdir -p /opt/xray && \
+      python -c "import urllib.request, zipfile; urllib.request.urlretrieve('https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip', '/tmp/xray.zip'); zipfile.ZipFile('/tmp/xray.zip').extractall('/opt/xray')" && \
+      rm /tmp/xray.zip && chmod 0755 /opt/xray/xray && \
+      setcap cap_net_admin,cap_net_raw+ep /opt/xray/xray && \
+      chmod -R a+rX /opt/xray ; \
     fi
-# Пути к nfqws и fake-payload'ам (если zapret не ставился — файлов нет, is_available()=False).
+# Пути к nfqws/fake (zapret) и xray/geo (gateway). Если ZAPRET!=true — файлов нет,
+# is_available()=False у обоих → /zapret и gateway дают только генерацию/ссылку.
 ENV ZAPRET_NFQWS=/opt/zapret/binaries/linux-x86_64/nfqws \
-    ZAPRET_FAKE_DIR=/opt/zapret/files/fake
+    ZAPRET_FAKE_DIR=/opt/zapret/files/fake \
+    XRAY_BIN=/opt/xray/xray \
+    XRAY_LOCATION_ASSET=/opt/xray
 
 # Три порта: ADMIN (панель), SUB (подписки), CLUSTER (peer-API кластера).
 # БД кластера — в /data (volume), переживает пересоздание контейнера.

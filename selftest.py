@@ -1302,6 +1302,48 @@ def t_gateway_config():
           and "type=ws" in link and "security=tls" in link and "path=%2Fvlessws" in link, link)
 
 
+def t_gateway_resolve():
+    print("\n[50c] resolve_gateways: серверный роутер → конфиг + ссылка + uuid стабилен")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "k0aaaaaa", "type": "key", "url": "", "label": "K"},
+            {"id": "auBBBBBB", "type": "autoselect", "url": "", "label": "AUTO"},
+            {"id": "rtCCCCCC", "type": "router", "url": "", "label": "GW"}],
+        "routes": [],
+        "edges": [
+            {"from": "k0aaaaaa", "to": "auBBBBBB"},
+            {"from": "auBBBBBB", "to": "rtCCCCCC"}],
+        "node_meta": {
+            "k0aaaaaa": {"keys": [{"link": "vless://k1@h1:443?type=tcp#K1"},
+                                  {"link": "vless://k2@h2:443?type=tcp#K2"}]},
+            "auBBBBBB": {"autoselect": {"params": {}}},
+            "rtCCCCCC": {"router": {
+                "rules": [{"match": {"kind": "preset", "value": "youtube"}, "target": "direct"}],
+                "default_target": "auBBBBBB", "params": {},
+                "gateway": {"enabled": True, "path": "/vlessws", "port": 8084, "domain": "happ.example.com"}}}},
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    gwmeta = st.get_config()["node_meta"]["rtCCCCCC"]["router"]["gateway"]
+    check("gateway uuid сгенерирован", bool(gwmeta.get("uuid")) and len(gwmeta["uuid"]) >= 8, gwmeta)
+    gws = graph.resolve_gateways(st)
+    check("один gateway", len(gws) == 1, len(gws))
+    g = gws[0]
+    ins = g["config"]["inbounds"]
+    check("vless-ws inbound", ins[0]["protocol"] == "vless" and ins[0]["streamSettings"]["network"] == "ws", ins)
+    check("uuid в inbound совпал", ins[0]["settings"]["clients"][0]["id"] == gwmeta["uuid"])
+    rr = g["config"]["routing"]["rules"]
+    check("youtube → direct (zapret egress)", rr[0].get("outboundTag") == "direct", rr[0])
+    check("default → balancer (авто-выбор)", str(rr[-1].get("balancerTag", "")).startswith("balancer-"), rr[-1])
+    check("универсальная ссылка ws+tls",
+          g["link"].startswith("vless://" + gwmeta["uuid"] + "@happ.example.com:443?") and "type=ws" in g["link"], g["link"])
+    # sync-safety: пересохранение графа НЕ меняет uuid
+    graph.save_graph(st, graph.get_graph(st))
+    check("uuid стабилен при пересохранении",
+          st.get_config()["node_meta"]["rtCCCCCC"]["router"]["gateway"]["uuid"] == gwmeta["uuid"])
+
+
 def t_router_custom_domain_ip():
     print("\n[51] роутер: кастомный domain/ip matcher")
     targets = {"t1": {"kind": "link", "link": "vless://u@h1:443?type=tcp#L"}}
@@ -1509,7 +1551,7 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_autoselect_edges, t_route_into_proc_resolve,
           t_zapret_validate, t_zapret_baseline, t_zapret_autotest_best,
           t_zapret_runstate, t_zapret_store, t_zapret_defaults, t_zapret_no_run_collision,
-          t_router_config_shape, t_gateway_config, t_router_custom_domain_ip, t_router_default_target,
+          t_router_config_shape, t_gateway_config, t_gateway_resolve, t_router_custom_domain_ip, t_router_default_target,
           t_router_missing_and_unknown, t_router_group_and_auto_targets, t_router_resolve_save,
           t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety):
     t()

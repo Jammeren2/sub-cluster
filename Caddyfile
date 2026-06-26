@@ -25,10 +25,19 @@
 	reverse_proxy app:8080
 }
 
-# Все остальные хосты — домены подписок (один или несколько) → порт подписок 8081.
+# Все остальные хосты — домены подписок (один или несколько).
+#   /vlessws*  → узел-gateway (xray vless-ws inbound, порт 8084) — универсальная ссылка;
+#   всё прочее → порт подписок 8081.
+# (если gateway не используешь — блок @vlessws безвреден: путь просто никто не дёргает.)
 :443 {
 	tls {
 		on_demand
 	}
-	reverse_proxy app:8081
+	@vlessws path /vlessws /vlessws/*
+	handle @vlessws {
+		reverse_proxy app:8084
+	}
+	handle {
+		reverse_proxy app:8081
+	}
 }
