@@ -340,7 +340,7 @@
     renderBuckets();
   }
 
-  // ── нода авто-выбора (все входы → один балансер leastPing, roadmap/03A) ──
+  // ── нода авто-выбора (все входы → один балансер leastPing) ──
   function makeAuto(s){
     s.type='autoselect'; s.gparams=s.gparams||{};
     const n=el('div','node autoselect'); n.style.left=s.x+'px'; n.style.top=s.y+'px';

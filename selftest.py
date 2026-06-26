@@ -935,7 +935,7 @@ def t_group_resolve_dedup():
           "total=1000" in (h.get("Subscription-Userinfo") or ""), h.get("Subscription-Userinfo"))
 
 
-# ── нода авто-выбора (все входы → один балансер leastPing, roadmap/03A) ────
+# ── нода авто-выбора (все входы → один балансер leastPing) ────
 def t_autoselect_emit():
     print("\n[40] авто-выбор: все входы → один балансер")
     route = {"id": "r", "mode": "merge"}

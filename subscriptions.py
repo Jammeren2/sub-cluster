@@ -563,7 +563,7 @@ def _wrap_as_balancer(member_outbounds, name, params=None):
     """N member-outbound'ов → ОДИН самодостаточный xray-конфиг (элемент Happ-массива)
     с клиентским балансером leastPing + burstObservatory (схема /s/sub «Быстрый»).
     Теги: proxy-0..proxy-(N-1). Selector по префиксу 'proxy-' → direct/block НЕ входят.
-    Это же ядро для roadmap/03A (одна корзина = все входы). Чисто структурная функция:
+    Это же ядро для авто-выбора (одна корзина = все входы). Чисто структурная функция:
     конвертация ссылок в outbound'ы — у вызывающего."""
     p = _norm_balancer_params(params)
     obs = []
@@ -689,7 +689,7 @@ def _resolve_group_members(group):
     def _emit(u):  # ссылка для passthrough — с применённым переименованием/именем
         return _apply_name(u["link"], u["rename"]) if u.get("rename") is not None else u["link"]
 
-    # авто-режим (нода авто-выбора, roadmap/03A): ВСЕ конвертируемые ссылки → ОДИН
+    # авто-режим (нода авто-выбора): ВСЕ конвертируемые ссылки → ОДИН
     # балансер leastPing (клиент сам выберет быстрейший по пингу); неконвертируемые →
     # отдельными записями. Корзины не используются.
     if group.get("auto"):

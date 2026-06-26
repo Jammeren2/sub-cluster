@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 WORKDIR /app
 COPY *.py editor.js editor.css ./
 
-# zapret (обход DPI, roadmap/04) — ОПЦИОНАЛЬНО, по умолчанию ВЫКЛЮЧЕНО (образ не пухнет,
+# zapret (обход DPI) — ОПЦИОНАЛЬНО, по умолчанию ВЫКЛЮЧЕНО (образ не пухнет,
 # поведение не меняется). Включить: docker build --build-arg INSTALL_ZAPRET=1 ...
 # Тогда нужны cap NET_ADMIN/NET_RAW (см. docker-compose) и ZAPRET_ENABLE_APPLY=1 в env,
 # чтобы авто-тест реально применял стратегии. Без этого /zapret даёт только baseline.

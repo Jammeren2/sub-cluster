@@ -245,7 +245,7 @@ def _node_group(source, node_meta):
 
 
 def _is_autoselect_node(source, node_meta):
-    """Нода авто-выбора (все входы → один балансер leastPing, roadmap/03A)."""
+    """Нода авто-выбора (все входы → один балансер leastPing)."""
     sid = source.get("id")
     meta = (node_meta or {}).get(sid) or {}
     if isinstance(meta.get("autoselect"), dict):
