@@ -1240,6 +1240,35 @@ def t_router_config_shape():
     check("direct/block в outbounds", "direct" in tags and "block" in tags)
 
 
+def t_gateway_config():
+    print("\n[50b] _wrap_as_server_gateway: серверный vless-ws + routing + fwmark + ссылка")
+    targets = {
+        "t_zap": {"kind": "direct"},   # zapret-таргет → freedom direct (egress + nfqws)
+        "t_auto": {"kind": "group", "name": "AUTO", "params": {}, "auto": True, "buckets": [],
+                   "subs": [{"url": "https://de/sub", "renames": []}], "keys": []},
+    }
+    rules = [{"match": {"kind": "preset", "value": "youtube"}, "target": "t_zap"}]
+    inbound = {"uuid": "11111111-1111-1111-1111-111111111111", "path": "/vlessws", "port": 8084}
+    c = subs._wrap_as_server_gateway(targets, rules, "t_auto", "GW", inbound, {"strategy": "leastPing"})
+    ins = c["inbounds"]
+    check("один vless inbound (сервер)", len(ins) == 1 and ins[0]["protocol"] == "vless", ins)
+    check("ws + path", ins[0]["streamSettings"]["network"] == "ws"
+          and ins[0]["streamSettings"]["wsSettings"]["path"] == "/vlessws", ins[0])
+    check("uuid клиента в inbound", ins[0]["settings"]["clients"][0]["id"] == inbound["uuid"])
+    check("sniffing включён (для server-side geosite)", ins[0]["sniffing"]["enabled"] is True)
+    check("нет socks/http (это не клиент)", all(i["protocol"] == "vless" for i in ins))
+    direct = next(o for o in c["outbounds"] if o.get("tag") == "direct")
+    check("freedom direct помечен fwmark (скоуп nfqws)",
+          direct["protocol"] == "freedom" and direct["streamSettings"]["sockopt"]["mark"] == subs.GATEWAY_MARK, direct)
+    rr = c["routing"]["rules"]
+    check("youtube → direct (zapret egress)", rr[0].get("outboundTag") == "direct", rr[0])
+    check("default → balancer (авто-выбор аплинков)", str(rr[-1].get("balancerTag", "")).startswith("balancer-"), rr[-1])
+    link = subs._gateway_link("happ.example.com", inbound["uuid"], "/vlessws", "GW")
+    check("vless ws+tls 443",
+          link.startswith("vless://11111111-1111-1111-1111-111111111111@happ.example.com:443?")
+          and "type=ws" in link and "security=tls" in link and "path=%2Fvlessws" in link, link)
+
+
 def t_router_custom_domain_ip():
     print("\n[51] роутер: кастомный domain/ip matcher")
     targets = {"t1": {"kind": "link", "link": "vless://u@h1:443?type=tcp#L"}}
@@ -1446,7 +1475,7 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_autoselect_edges,
           t_zapret_validate, t_zapret_baseline, t_zapret_autotest_best,
           t_zapret_runstate, t_zapret_store, t_zapret_defaults, t_zapret_no_run_collision,
-          t_router_config_shape, t_router_custom_domain_ip, t_router_default_target,
+          t_router_config_shape, t_gateway_config, t_router_custom_domain_ip, t_router_default_target,
           t_router_missing_and_unknown, t_router_group_and_auto_targets, t_router_resolve_save,
           t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety):
     t()

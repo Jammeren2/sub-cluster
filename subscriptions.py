@@ -18,6 +18,7 @@ import uuid
 import base64
 import threading
 import urllib.request
+from urllib.parse import quote as _urlquote, urlencode as _urlencode
 import urllib.parse
 
 UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "20"))
@@ -775,16 +776,13 @@ def _materialize_target_outbounds(tinfo):
     return []   # direct / неизвестно
 
 
-def _wrap_as_router(targets_resolved, rules, default_target, name, params=None):
-    """Правила (geosite/geoip → target) → ОДИН клиентский xray-конфиг (Фаза A).
-    Каждый таргет → proxy-<tidx>-N; таргет с >1 outbound получает balancer-<tidx>
-    (selector ['proxy-<tidx>-']); 1 outbound → прямой outboundTag. routing.rules в
-    порядке первого совпадения; финал — default. Неконвертируемые/пустой/пропавший/
-    zapret таргет → direct (warn). Структурная функция, как _wrap_as_balancer."""
-    p = _norm_balancer_params(params)
+def _router_core(targets_resolved, rules, default_target, p, name):
+    """Общее ядро роутера → (outbounds, balancers, rrules, observed, skipped).
+    outbounds БЕЗ freedom/blackhole — их добавляет вызывающий (клиент: обычный freedom;
+    сервер-gateway: freedom с fwmark). Используется _wrap_as_router и _wrap_as_server_gateway.
+    Каждый таргет → proxy-<tidx>-N; >1 outbound → balancer-<tidx>; zapret/пустой/direct → direct."""
     outbounds, balancers, observed, skipped_total = [], [], False, 0
     tag_for = {}                                  # input_id -> ("outbound"|"balancer", tag) | None
-
     for tidx, tid in enumerate(targets_resolved.keys()):
         tinfo = targets_resolved[tid]
         if (tinfo or {}).get("kind") == "direct":
@@ -808,9 +806,6 @@ def _wrap_as_router(targets_resolved, rules, default_target, name, params=None):
                               "strategy": {"type": p["strategy"]}})
             tag_for[tid] = ("balancer", btag)
         observed = True
-
-    outbounds.append({"protocol": "freedom", "tag": "direct"})
-    outbounds.append({"protocol": "blackhole", "tag": "block"})
 
     def _dest(tid):
         if tid == "direct" or tid not in tag_for or tag_for[tid] is None:
@@ -849,7 +844,16 @@ def _wrap_as_router(targets_resolved, rules, default_target, name, params=None):
     if skipped_total:
         print(f"[-] роутер «{name}»: {skipped_total} таргет(ов) без конвертируемых "
               f"outbound'ов → их трафик уходит в direct", flush=True)
+    return outbounds, balancers, rrules, observed, skipped_total
 
+
+def _wrap_as_router(targets_resolved, rules, default_target, name, params=None):
+    """Правила (geosite/geoip → target) → ОДИН КЛИЕНТСКИЙ xray-конфиг (Фаза A):
+    socks/http inbound; ядро (outbounds/routing) — общее с серверным gateway."""
+    p = _norm_balancer_params(params)
+    outbounds, balancers, rrules, observed, _ = _router_core(targets_resolved, rules, default_target, p, name)
+    outbounds = outbounds + [{"protocol": "freedom", "tag": "direct"},
+                             {"protocol": "blackhole", "tag": "block"}]
     cfg = {
         "remarks": name,
         "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
@@ -869,6 +873,59 @@ def _wrap_as_router(targets_resolved, rules, default_target, name, params=None):
                            "timeout": p["timeout"], "sampling": p["sampling"]},
         }
     return cfg
+
+
+# ── нода-роутер: СЕРВЕРНЫЙ режим (gateway) ────────────────────────────────────
+# Один vless-ws inbound НА УЗЛЕ; xray раскидывает трафик server-side: zapret-таргет →
+# freedom 'direct' (egress + nfqws, скоуп по fwmark), остальное → balancer/outbound
+# аплинков (лучший VPN). TLS терминирует Caddy/Coolify на 443 → xray получает чистый ws.
+GATEWAY_MARK = int(os.environ.get("GATEWAY_FWMARK", "1080"))
+GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "8084"))
+GATEWAY_WS_PATH = os.environ.get("GATEWAY_WS_PATH", "/vlessws")
+
+
+def _wrap_as_server_gateway(targets_resolved, rules, default_target, name, inbound, params=None):
+    """СЕРВЕРНЫЙ xray-конфиг узла-gateway: vless-ws inbound + routing (ядро роутера).
+    inbound = {"uuid","path","port"}. freedom 'direct' помечается fwmark — nfqws на egress
+    скоупится РОВНО на zapret-таргетный трафик (аплинки идут нетронутыми). sniffing включён,
+    иначе server-side geosite/domain-правила не видят SNI."""
+    p = _norm_balancer_params(params)
+    outbounds, balancers, rrules, observed, _ = _router_core(targets_resolved, rules, default_target, p, name)
+    outbounds = outbounds + [
+        {"protocol": "freedom", "tag": "direct", "streamSettings": {"sockopt": {"mark": GATEWAY_MARK}}},
+        {"protocol": "blackhole", "tag": "block"},
+    ]
+    uid = (inbound or {}).get("uuid") or ""
+    path = (inbound or {}).get("path") or GATEWAY_WS_PATH
+    port = int((inbound or {}).get("port") or GATEWAY_PORT)
+    cfg = {
+        "log": {"loglevel": "warning"},
+        "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
+        "inbounds": [{
+            "tag": "vless-in", "listen": "0.0.0.0", "port": port, "protocol": "vless",
+            "settings": {"clients": [{"id": uid, "email": name or "gateway"}], "decryption": "none"},
+            "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": path}},
+            "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
+        }],
+        "outbounds": outbounds,
+        "routing": {"domainStrategy": p["domain_strategy"], "rules": rrules},
+    }
+    if balancers:
+        cfg["routing"]["balancers"] = balancers
+    if observed:
+        cfg["burstObservatory"] = {
+            "subjectSelector": ["proxy-"],
+            "pingConfig": {"destination": p["probe_url"], "interval": p["interval"],
+                           "timeout": p["timeout"], "sampling": p["sampling"]},
+        }
+    return cfg
+
+
+def _gateway_link(domain, uuid_str, path=None, name="gateway", port=443):
+    """Универсальная клиентская vless-ссылка на gateway (vless + ws + tls через 443)."""
+    q = _urlencode({"encryption": "none", "security": "tls", "type": "ws",
+                    "host": domain, "path": path or GATEWAY_WS_PATH, "sni": domain})
+    return f"vless://{uuid_str}@{domain}:{port}?{q}#{_urlquote(name or 'gateway')}"
 
 
 def build_merged_response(route, spec, announce=""):
