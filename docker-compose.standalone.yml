@@ -28,11 +28,11 @@ services:
       ZAPRET_ENABLE_APPLY: "${ZAPRET_ENABLE_APPLY:-0}"
     volumes:
       - cluster-data:/data
-    # zapret (обход DPI) — раскомментируй, ЕСЛИ собрал образ с INSTALL_ZAPRET=1 и хочешь,
-    # чтобы авто-тест реально применял стратегии (плюс ZAPRET_ENABLE_APPLY=1 в .env).
-    # cap_add:
-    #   - NET_ADMIN
-    #   - NET_RAW
+    # zapret (обход DPI): права на NFQUEUE/iptables. Работают вместе с INSTALL_ZAPRET=1 +
+    # ZAPRET_ENABLE_APPLY=1 (.env). Если zapret не используешь — можно закомментировать.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     # чтобы контейнер мог дёрнуть redeploy-agent на ХОСТЕ (http://host.docker.internal:9090)
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -22,6 +22,9 @@ RUN if [ "$INSTALL_ZAPRET" = "1" ]; then \
       python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/bol-van/zapret/releases/download/${ZAPRET_VERSION}/zapret-${ZAPRET_VERSION}.tar.gz', '/tmp/zapret.tgz')" && \
       tar -xzf /tmp/zapret.tgz -C /opt/zapret --strip-components=1 && rm /tmp/zapret.tgz && \
       setcap cap_net_admin,cap_net_raw+ep /opt/zapret/binaries/linux-x86_64/nfqws && \
+      for b in /usr/sbin/xtables-nft-multi /usr/sbin/xtables-legacy-multi; do \
+        [ -e "$b" ] && setcap cap_net_admin,cap_net_raw+ep "$b" || true ; \
+      done && \
       chmod -R a+rX /opt/zapret ; \
     fi
 # Пути к nfqws и fake-payload'ам (если zapret не ставился — файлов нет, is_available()=False).

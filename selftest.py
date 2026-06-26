@@ -1163,6 +1163,24 @@ def t_zapret_defaults():
         _, toks = zapret.validate_params(combo["params"])
         p = zapret._collect_filter_ports(toks)
         check("комбо: tcp+udp порты собраны", "443" in p["tcp"] and "443" in p["udp"], p)
+    # комьюнити-набор: тоже валиден, мульти-секционный, ссылается на shipped fake-payload'ы
+    cs = zapret.COMMUNITY_STRATEGIES
+    check("комьюнити-набор непустой", isinstance(cs, list) and len(cs) >= 4, len(cs) if isinstance(cs, list) else cs)
+    for d in cs:
+        ok, res = zapret.validate_params(d.get("params") or "")
+        check(f"комьюнити валидна: {d.get('label')}", ok, res if not ok else "")
+    check("есть мульти-секционная комьюнити (--new)", any("--new" in (d.get("params") or "") for d in cs))
+    check("комьюнити ссылается на ZAPRET_FAKE_DIR",
+          all(zapret.ZAPRET_FAKE_DIR in (d.get("params") or "") for d in cs))
+    # все режимы desync в комьюнити-наборе — из поддерживаемых nfqws v72.12
+    import re as _re
+    modes = set()
+    for d in cs:
+        modes.update(_re.findall(r"--dpi-desync=([a-z0-9,]+)", d.get("params") or ""))
+    flat = set(m for grp in modes for m in grp.split(","))
+    known = {"fake", "split2", "disorder2", "fakedsplit", "fakeddisorder",
+             "multisplit", "multidisorder", "hostfakesplit", "syndata", "ipfrag2", "udplen", "tamper"}
+    check("режимы desync известны nfqws", flat <= known, flat - known)
 
 
 def t_zapret_no_run_collision():

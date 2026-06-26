@@ -183,22 +183,22 @@ Caddy терминирует HTTPS для admin-домена узла и дом�
 с узла **с обходом и без**, и сам ставит лучшую стратегию (можно сменить). Логи — в модалке
 (эфемерные).
 
-Кнопка **«+ набор по умолчанию»** добавляет готовые канонические стратегии (`fake,split2`,
-`fakedsplit`, `multisplit`, `syndata`, QUIC-fake для YouTube и т.д.), ссылающиеся на
-fake-payload'ы из установленного zapret (`/opt/zapret/files/fake/`). Можно также **вставить
-свой конфиг zapret целиком**, в т.ч. мульти-секционный через `--new`, с путями к листам/бинам.
-Параметры уходят в `nfqws` **списком аргументов (без shell)**; валидация отсекает только мусор
-и shell-метасимволы, конкретный белый список флагов не ведётся.
+Две кнопки набивают список готовыми стратегиями:
+- **«+ набор по умолчанию»** — канонические стратегии (`fake,split2`, `fakedsplit`,
+  `multisplit`, `syndata`, QUIC-fake для YouTube, комбо TCP+QUIC);
+- **«+ комьюнити»** — популярные мульти-секционные рецепты (QUIC google + Discord/STUN по UDP
+  + general через `hostfakesplit` и т.п.).
 
-По умолчанию zapret **не установлен** (`is_available()=false`) → авто-тест показывает только
-базовую доступность сервисов **без обхода**. Чтобы поставить zapret в образ и применять обход:
+Обе ссылаются на fake-payload'ы из установленного zapret (`/opt/zapret/files/fake/`). Можно
+также **вставить свой конфиг zapret целиком**, в т.ч. мульти-секционный через `--new`, с
+путями к листам/бинам. Параметры уходят в `nfqws` **списком аргументов (без shell)**; валидация
+отсекает только мусор и shell-метасимволы, конкретный белый список флагов не ведётся.
 
-1. В `.env`: `INSTALL_ZAPRET=1` и `ZAPRET_ENABLE_APPLY=1`.
-2. В `docker-compose*.yml` раскомментируй `cap_add: [NET_ADMIN, NET_RAW]` у сервиса `app`.
-3. Пересобери: `docker compose up -d --build` (или `docker build --build-arg INSTALL_ZAPRET=1 .`).
-
-Образ ставит **release-бинарник** `nfqws` (bol-van/zapret, статический) — версия в
-`ARG ZAPRET_VERSION` (Dockerfile). zapret трогает только egress контейнера, не хост.
+zapret ставится из образа, собранного с `INSTALL_ZAPRET=1` (**release-бинарник** `nfqws`,
+bol-van/zapret, статический — версия в `ARG ZAPRET_VERSION`). В шаблоне `.env.example` обход
+**включён** (`INSTALL_ZAPRET=1`, `ZAPRET_ENABLE_APPLY=1`), а `cap_add: [NET_ADMIN, NET_RAW]`
+уже прописан в compose — достаточно `docker compose up -d --build`. Не нужен zapret — поставь
+обе переменные в `0` (и можно убрать `cap_add`). zapret трогает только egress контейнера, не хост.
 
 > **Ограничение текущей фазы.** zapret и роутер-нода сейчас работают на стороне **клиента**
 > (узел отдаёт конфиги, трафик через него не проходит). «YouTube через обход DPI для трафика
@@ -216,6 +216,8 @@ fake-payload'ы из установленного zapret (`/opt/zapret/files/fak
 - Пароли reg.ru и redeploy-токены хранятся в БД **зашифрованными** (`SECRET_KEY`).
 - Peer-API между узлами подписан **HMAC** (`CLUSTER_SECRET`); действия из UI — сессия + CSRF.
 - Панель/подписки рассчитаны на работу **за HTTPS-реверс-прокси** (Coolify/Caddy).
+- Compose по умолчанию даёт контейнеру `cap_add: [NET_ADMIN, NET_RAW]` (для zapret/NFQUEUE).
+  Не используешь обход DPI — убери `cap_add` и поставь `INSTALL_ZAPRET=0`/`ZAPRET_ENABLE_APPLY=0`.
 
 ---
 

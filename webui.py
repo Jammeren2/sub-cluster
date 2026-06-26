@@ -611,7 +611,7 @@ def render_stats(stats, routes, node_id, sub_base):
 
 
 # ── zapret (обход DPI): стратегии + авто-тест ───────────────────────────────
-def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", defaults=None):
+def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", defaults=None, community=None):
     z_ui = {
         "strategies": [{"id": s.get("id", ""), "label": s.get("label", ""), "params": s.get("params", "")}
                        for s in (z.get("strategies") or [])],
@@ -619,6 +619,7 @@ def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", d
         "services": [{"key": s["key"], "label": s["label"]} for s in services],
         "available": bool(available), "can_apply": bool(can_apply), "node": node_id,
         "defaults": [{"label": d.get("label", ""), "params": d.get("params", "")} for d in (defaults or [])],
+        "community": [{"label": d.get("label", ""), "params": d.get("params", "")} for d in (community or [])],
     }
     why = f' <b>Причина:</b> {esc(reason)}' if reason else ''
     if not available:
@@ -654,6 +655,7 @@ def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", d
   <button class="btn small" type="button" id="zadd">+ стратегия</button>
   <button class="btn small gray" type="button" id="zdirect">+ direct</button>
   <button class="btn small gray" type="button" id="zdefaults">+ набор по умолчанию</button>
+  <button class="btn small gray" type="button" id="zcommunity">+ комьюнити</button>
   <button class="btn small primary" type="button" id="zsave">Сохранить стратегии</button>
 </div>
 <div class="card"><div class="route-title">Сервисы для теста</div>
@@ -706,14 +708,16 @@ ZAPRET_JS = r"""
   }
   document.getElementById('zadd').addEventListener('click',function(){ Z.strategies.push({id:genId(),label:'',params:''}); render(); });
   document.getElementById('zdirect').addEventListener('click',function(){ Z.strategies.push({id:genId(),label:'Прямой (без обхода)',params:''}); render(); });
-  document.getElementById('zdefaults').addEventListener('click',function(){
+  function addSet(arr,emptyMsg){
     var have={}; Z.strategies.forEach(function(s){ have[(s.params||'').trim()]=1; });
     var added=0;
-    (Z.defaults||[]).forEach(function(d){ var p=(d.params||'').trim(); if(have[p])return; have[p]=1;
+    (arr||[]).forEach(function(d){ var p=(d.params||'').trim(); if(have[p])return; have[p]=1;
       Z.strategies.push({id:genId(),label:d.label||'',params:d.params||''}); added++; });
-    if(!added && !(Z.defaults||[]).length) alert('Набор по умолчанию пуст.');
+    if(!added && !(arr||[]).length) alert(emptyMsg);
     render();
-  });
+  }
+  document.getElementById('zdefaults').addEventListener('click',function(){ addSet(Z.defaults,'Набор по умолчанию пуст.'); });
+  document.getElementById('zcommunity').addEventListener('click',function(){ addSet(Z.community,'Комьюнити-набор пуст.'); });
 
   Z.services.forEach(function(sv){
     var lab=el('label','zchk'); var cb=el('input'); cb.type='checkbox'; cb.checked=true; cb.dataset.k=sv.key; cb.style.width='auto';

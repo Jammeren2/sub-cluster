@@ -80,6 +80,42 @@ def _default_strategies():
 
 DEFAULT_STRATEGIES = _default_strategies()
 
+
+# «Комьюнити»-стратегии: популярные мульти-секционные рецепты (QUIC google + Discord/STUN +
+# general с hostfakesplit и т.п.), адаптированные под РЕАЛЬНЫЕ пути bol-van/zapret
+# (fake-payload'ы из ZAPRET_FAKE_DIR — проверено по релизу v72.12). Все режимы/флаги
+# (hostfakesplit, multisplit, fakedsplit, fakeddisorder, filter-l7, fake-discord/stun)
+# поддерживаются nfqws v72.12. Применяются по портам (без --hostlist — файлов-листов в
+# образе нет; если нужны листы, положи их в образ и добавь --hostlist=… в свою стратегию).
+def _community_strategies():
+    f = ZAPRET_FAKE_DIR
+    q = f + "/quic_initial_www_google_com.bin"
+    return [
+        {"label": "Comm: комбо QUIC+Discord+general", "params":
+            f"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic={q} --new "
+            f"--filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake "
+            f"--dpi-desync-fake-discord={f}/discord-ip-discovery-with-port.bin "
+            f"--dpi-desync-fake-stun={f}/stun.bin --dpi-desync-repeats=6 --new "
+            "--filter-tcp=80,443 --dpi-desync=hostfakesplit --dpi-desync-repeats=4 "
+            "--dpi-desync-fooling=ts --dpi-desync-hostfakesplit-mod=host=www.google.com"},
+        {"label": "Comm: fakedsplit + QUIC", "params":
+            "--filter-tcp=80,443 --dpi-desync=fakedsplit --dpi-desync-split-pos=1 --dpi-desync-ttl=2 --new "
+            f"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic={q}"},
+        {"label": "Comm: multisplit + QUIC", "params":
+            "--filter-tcp=80,443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-fooling=badseq --new "
+            f"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic={q}"},
+        {"label": "Comm: hostfakesplit ts+md5sig", "params":
+            "--filter-tcp=80,443 --dpi-desync=hostfakesplit --dpi-desync-repeats=4 "
+            "--dpi-desync-fooling=ts,md5sig --dpi-desync-hostfakesplit-mod=host=www.google.com --new "
+            f"--filter-udp=443 --dpi-desync=fake --dpi-desync-fake-quic={q}"},
+        {"label": "Comm: fakeddisorder + QUIC", "params":
+            "--filter-tcp=80,443 --dpi-desync=fakeddisorder --dpi-desync-split-pos=1 --dpi-desync-fooling=md5sig --new "
+            f"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic={q}"},
+    ]
+
+
+COMMUNITY_STRATEGIES = _community_strategies()
+
 # Валидация стратегии nfqws. Аргументы уходят в subprocess СПИСКОМ (без shell),
 # поэтому инъекция шелл-команд невозможна в принципе; задача валидации — отсечь
 # мусор и shell-метасимволы. Белый список конкретных флагов НЕ ведём (у zapret их
