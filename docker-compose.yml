@@ -25,9 +25,9 @@ services:
     build:
       context: .
       args:
-        # Одна переменная ZAPRET=true в .env включает zapret: ставит nfqws в образ ЗДЕСЬ
-        # (build-time) и применение обхода — в env ниже (runtime). По умолчанию off.
-        INSTALL_ZAPRET: "${ZAPRET:-false}"
+        # nfqws+xray в образ — ПО УМОЛЧАНИЮ ставятся (fallback 1), чтобы работало даже
+        # когда Coolify не прокидывает переменные на сборку. Лёгкий образ: INSTALL_ZAPRET=0.
+        INSTALL_ZAPRET: "${INSTALL_ZAPRET:-1}"
     image: sub-cluster
     restart: unless-stopped
     environment:

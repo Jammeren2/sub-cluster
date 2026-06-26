@@ -11,9 +11,10 @@ COPY *.py editor.js editor.css ./
 # поведение не меняется). Включить: docker build --build-arg INSTALL_ZAPRET=1 ...
 # Тогда нужны cap NET_ADMIN/NET_RAW (см. docker-compose) и ZAPRET_ENABLE_APPLY=1 в env,
 # чтобы авто-тест реально применял стратегии. Без этого /zapret даёт только baseline.
-# Ставить zapret в образ. Управляется одной переменной ZAPRET=true в .env (compose
-# прокидывает её сюда как build-arg). Принимает 1/true.
-ARG INSTALL_ZAPRET=0
+# Ставить zapret+xray в образ. ПО УМОЛЧАНИЮ ВКЛЮЧЕНО (=1): иначе в Coolify build-arg из
+# .env не прокидывается на сборку и nfqws никогда не попадает в образ. Рантайм-применение
+# гейтит ZAPRET=true (ZAPRET_ENABLE_APPLY). Лёгкий образ без zapret: build-arg INSTALL_ZAPRET=0.
+ARG INSTALL_ZAPRET=1
 # Версия zapret. ВАЖНО: prebuilt-бинарники (nfqws) лежат только в release-тарболе, в git
 # их НЕТ — поэтому ставим из релиза, а не `git clone`. Бинарники статические (musl).
 ARG ZAPRET_VERSION=v72.12
@@ -26,7 +27,8 @@ RUN if [ "$INSTALL_ZAPRET" = "1" ] || [ "$INSTALL_ZAPRET" = "true" ]; then \
       mkdir -p /opt/zapret && \
       python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/bol-van/zapret/releases/download/${ZAPRET_VERSION}/zapret-${ZAPRET_VERSION}.tar.gz', '/tmp/zapret.tgz')" && \
       tar -xzf /tmp/zapret.tgz -C /opt/zapret --strip-components=1 && rm /tmp/zapret.tgz && \
-      setcap cap_net_admin,cap_net_raw+ep /opt/zapret/binaries/linux-x86_64/nfqws && \
+      ( setcap cap_net_admin,cap_net_raw+ep /opt/zapret/binaries/linux-x86_64/nfqws || \
+        echo "WARN: setcap nfqws не удался (caps дадим рантаймом)" ) && \
       for b in /usr/sbin/xtables-nft-multi /usr/sbin/xtables-legacy-multi; do \
         [ -e "$b" ] && setcap cap_net_admin,cap_net_raw+ep "$b" || true ; \
       done && \
@@ -34,7 +36,7 @@ RUN if [ "$INSTALL_ZAPRET" = "1" ] || [ "$INSTALL_ZAPRET" = "true" ]; then \
       mkdir -p /opt/xray && \
       python -c "import urllib.request, zipfile; urllib.request.urlretrieve('https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip', '/tmp/xray.zip'); zipfile.ZipFile('/tmp/xray.zip').extractall('/opt/xray')" && \
       rm /tmp/xray.zip && chmod 0755 /opt/xray/xray && \
-      setcap cap_net_admin,cap_net_raw+ep /opt/xray/xray && \
+      ( setcap cap_net_admin,cap_net_raw+ep /opt/xray/xray || echo "WARN: setcap xray не удался" ) && \
       chmod -R a+rX /opt/xray ; \
     fi
 # Пути к nfqws/fake (zapret) и xray/geo (gateway). Если ZAPRET!=true — файлов нет,

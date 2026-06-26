@@ -214,8 +214,8 @@ def unavailable_reason():
     if not sys.platform.startswith("linux"):
         return "узел не на Linux (nfqws работает только на Linux)"
     if nfqws_path() is None:
-        return ("бинарник nfqws не найден — задай ZAPRET=true в .env и пересобери образ "
-                "(docker compose up -d --build)")
+        return ("бинарник nfqws не найден — пересобери образ (docker compose up -d --build); "
+                "nfqws ставится по умолчанию (если не задан INSTALL_ZAPRET=0)")
     if not _env_true("ZAPRET_ENABLE_APPLY"):
         return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
     return ""
