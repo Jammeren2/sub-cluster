@@ -25,9 +25,9 @@ services:
     build:
       context: .
       args:
-        # zapret в образ: поставь INSTALL_ZAPRET=1 в .env (Coolify: build arg) → в образе
-        # будет nfqws и /zapret сможет применять стратегии. По умолчанию 0 (лёгкий образ).
-        INSTALL_ZAPRET: "${INSTALL_ZAPRET:-0}"
+        # Одна переменная ZAPRET=true в .env включает zapret: ставит nfqws в образ ЗДЕСЬ
+        # (build-time) и применение обхода — в env ниже (runtime). По умолчанию off.
+        INSTALL_ZAPRET: "${ZAPRET:-false}"
     image: sub-cluster
     restart: unless-stopped
     environment:
@@ -52,8 +52,8 @@ services:
       ADMIN_USER: "${ADMIN_USER:-admin}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
       CACHE_TTL: "${CACHE_TTL:-60}"
-      # Применять обход к egress (нужно INSTALL_ZAPRET=1 + cap_add ниже). 0 = только baseline.
-      ZAPRET_ENABLE_APPLY: "${ZAPRET_ENABLE_APPLY:-0}"
+      # Применять обход к egress (та же ZAPRET=true + cap_add ниже). off = только baseline.
+      ZAPRET_ENABLE_APPLY: "${ZAPRET:-false}"
     volumes:
       - cluster-data:/data
     # zapret (обход DPI): права на NFQUEUE/iptables. Работают вместе с INSTALL_ZAPRET=1 +

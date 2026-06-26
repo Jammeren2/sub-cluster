@@ -1181,6 +1181,13 @@ def t_zapret_defaults():
     known = {"fake", "split2", "disorder2", "fakedsplit", "fakeddisorder",
              "multisplit", "multidisorder", "hostfakesplit", "syndata", "ipfrag2", "udplen", "tamper"}
     check("режимы desync известны nfqws", flat <= known, flat - known)
+    # ZAPRET=true как единый переключатель: _env_true принимает 1/true/yes/on
+    import os as _os
+    for v, exp in (("true", True), ("True", True), ("1", True), ("yes", True),
+                   ("on", True), ("0", False), ("false", False), ("", False)):
+        _os.environ["ZAPRET_ENABLE_APPLY"] = v
+        check(f"_env_true({v!r})={exp}", zapret._env_true("ZAPRET_ENABLE_APPLY") is exp)
+    _os.environ.pop("ZAPRET_ENABLE_APPLY", None)
 
 
 def t_zapret_no_run_collision():

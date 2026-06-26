@@ -11,11 +11,13 @@ COPY *.py editor.js editor.css ./
 # поведение не меняется). Включить: docker build --build-arg INSTALL_ZAPRET=1 ...
 # Тогда нужны cap NET_ADMIN/NET_RAW (см. docker-compose) и ZAPRET_ENABLE_APPLY=1 в env,
 # чтобы авто-тест реально применял стратегии. Без этого /zapret даёт только baseline.
+# Ставить zapret в образ. Управляется одной переменной ZAPRET=true в .env (compose
+# прокидывает её сюда как build-arg). Принимает 1/true.
 ARG INSTALL_ZAPRET=0
 # Версия zapret. ВАЖНО: prebuilt-бинарники (nfqws) лежат только в release-тарболе, в git
 # их НЕТ — поэтому ставим из релиза, а не `git clone`. Бинарники статические (musl).
 ARG ZAPRET_VERSION=v72.12
-RUN if [ "$INSTALL_ZAPRET" = "1" ]; then \
+RUN if [ "$INSTALL_ZAPRET" = "1" ] || [ "$INSTALL_ZAPRET" = "true" ]; then \
       apt-get update && apt-get install -y --no-install-recommends iptables libcap2-bin ca-certificates && \
       rm -rf /var/lib/apt/lists/* && \
       mkdir -p /opt/zapret && \

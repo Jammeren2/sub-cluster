@@ -194,11 +194,16 @@ Caddy терминирует HTTPS для admin-домена узла и дом�
 путями к листам/бинам. Параметры уходят в `nfqws` **списком аргументов (без shell)**; валидация
 отсекает только мусор и shell-метасимволы, конкретный белый список флагов не ведётся.
 
-zapret ставится из образа, собранного с `INSTALL_ZAPRET=1` (**release-бинарник** `nfqws`,
-bol-van/zapret, статический — версия в `ARG ZAPRET_VERSION`). В шаблоне `.env.example` обход
-**включён** (`INSTALL_ZAPRET=1`, `ZAPRET_ENABLE_APPLY=1`), а `cap_add: [NET_ADMIN, NET_RAW]`
-уже прописан в compose — достаточно `docker compose up -d --build`. Не нужен zapret — поставь
-обе переменные в `0` (и можно убрать `cap_add`). zapret трогает только egress контейнера, не хост.
+Включается **одной переменной** `ZAPRET=true` в `.env`: она кладёт `nfqws` (release-бинарник
+bol-van/zapret, статический — версия в `ARG ZAPRET_VERSION`) в образ **на сборке** и включает
+применение стратегий в рантайме; `cap_add: [NET_ADMIN, NET_RAW]` уже прописан в compose.
+**Важно:** установка происходит на сборке — после смены `ZAPRET` пересобери:
+```bash
+# .env:  ZAPRET=true
+docker compose up -d --build      # узел скачает release-nfqws (~8 МБ) и положит в образ
+```
+`ZAPRET=false` (или убрать строку) — zapret не ставится, `/zapret` даёт только baseline.
+zapret трогает только egress контейнера, не хост.
 
 > **Ограничение текущей фазы.** zapret и роутер-нода сейчас работают на стороне **клиента**
 > (узел отдаёт конфиги, трафик через него не проходит). «YouTube через обход DPI для трафика
@@ -217,7 +222,7 @@ bol-van/zapret, статический — версия в `ARG ZAPRET_VERSION`)
 - Peer-API между узлами подписан **HMAC** (`CLUSTER_SECRET`); действия из UI — сессия + CSRF.
 - Панель/подписки рассчитаны на работу **за HTTPS-реверс-прокси** (Coolify/Caddy).
 - Compose по умолчанию даёт контейнеру `cap_add: [NET_ADMIN, NET_RAW]` (для zapret/NFQUEUE).
-  Не используешь обход DPI — убери `cap_add` и поставь `INSTALL_ZAPRET=0`/`ZAPRET_ENABLE_APPLY=0`.
+  Не используешь обход DPI — поставь `ZAPRET=false` в `.env` и убери `cap_add` из compose.
 
 ---
 

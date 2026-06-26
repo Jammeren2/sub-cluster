@@ -10,7 +10,7 @@ zapret.py — каркас ноды zapret (обход DPI) + авто-тест 
   • run_autotest() — для каждой стратегии (при наличии zapret) применяет обход и
     перепроверяет доступность; выбирает лучшую (макс. доступных сервисов);
   • apply_strategy()/clear_strategy() — ПРИВИЛЕГИРОВАННАЯ часть (nfqws/iptables),
-    работает только на Linux с NET_ADMIN и явным согласием (ZAPRET_ENABLE_APPLY=1);
+    работает только на Linux с NET_ADMIN и явным согласием (ZAPRET=true);
     в моей среде НЕ тестировалась — изолирована за is_available()/can_apply().
 
 Безопасность: nfqws вызывается СПИСКОМ аргументов (без shell); валидация стратегии
@@ -197,10 +197,16 @@ def is_available():
     return sys.platform.startswith("linux") and nfqws_path() is not None
 
 
+def _env_true(name):
+    """Булев env: принимает 1/true/yes/on (без регистра). Удобно для ZAPRET=true в .env."""
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def can_apply():
-    """Реально применять обход к egress — только при явном согласии (защита от
-    случайной правки сети непротестированным кодом). Иначе авто-тест = только baseline."""
-    return is_available() and os.environ.get("ZAPRET_ENABLE_APPLY") == "1"
+    """Реально применять обход к egress — только при явном согласии (защита от случайной
+    правки сети непротестированным кодом). Включается ZAPRET=true (ZAPRET_ENABLE_APPLY).
+    Иначе авто-тест = только baseline."""
+    return is_available() and _env_true("ZAPRET_ENABLE_APPLY")
 
 
 def unavailable_reason():
@@ -208,11 +214,10 @@ def unavailable_reason():
     if not sys.platform.startswith("linux"):
         return "узел не на Linux (nfqws работает только на Linux)"
     if nfqws_path() is None:
-        return ("бинарник nfqws не найден — пересобери образ с "
-                "--build-arg INSTALL_ZAPRET=1 (или задай ZAPRET_NFQWS=путь)")
-    if os.environ.get("ZAPRET_ENABLE_APPLY") != "1":
-        return ("применение выключено — задай ZAPRET_ENABLE_APPLY=1 и дай контейнеру "
-                "cap NET_ADMIN/NET_RAW (см. docker-compose)")
+        return ("бинарник nfqws не найден — задай ZAPRET=true в .env и пересобери образ "
+                "(docker compose up -d --build)")
+    if not _env_true("ZAPRET_ENABLE_APPLY"):
+        return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
     return ""
 
 

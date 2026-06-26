@@ -624,11 +624,12 @@ def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", d
     why = f' <b>Причина:</b> {esc(reason)}' if reason else ''
     if not available:
         banner = ('<div class="flash err">zapret недоступен на этом узле — авто-тест покажет ТОЛЬКО базовую '
-                  'доступность сервисов <b>без обхода</b>.' + why + ' Чтобы тестировать стратегии: пересобери '
-                  'образ с <span class="mono">--build-arg INSTALL_ZAPRET=1</span> + cap NET_ADMIN/NET_RAW.</div>')
+                  'доступность сервисов <b>без обхода</b>.' + why + ' Чтобы применять стратегии: '
+                  '<span class="mono">ZAPRET=true</span> в .env и пересобрать '
+                  '(<span class="mono">docker compose up -d --build</span>).</div>')
     elif not can_apply:
         banner = ('<div class="flash">zapret найден, но применение обхода выключено — задай '
-                  '<span class="mono">ZAPRET_ENABLE_APPLY=1</span> на узле, чтобы авто-тест реально применял стратегии.'
+                  '<span class="mono">ZAPRET=true</span> в .env, чтобы авто-тест реально применял стратегии.'
                   + why + ' Сейчас — только baseline (доступность без обхода).</div>')
     else:
         banner = ('<div class="flash">zapret активен: авто-тест применяет стратегии к egress контейнера и меряет '
