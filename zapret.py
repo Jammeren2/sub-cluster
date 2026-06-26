@@ -56,37 +56,62 @@ SERVICE_BY_KEY = {s["key"]: s for s in SERVICES}
 
 PROBE_TIMEOUT = float(os.environ.get("ZAPRET_PROBE_TIMEOUT", "4"))
 
-# Белый список флагов nfqws (для валидации пользовательской стратегии перед запуском).
-_ALLOWED_FLAGS = {
-    "--dpi-desync", "--dpi-desync-ttl", "--dpi-desync-ttl6", "--dpi-desync-fooling",
-    "--dpi-desync-split-pos", "--dpi-desync-split-http-req", "--dpi-desync-split-tls",
-    "--dpi-desync-repeats", "--dpi-desync-fake-tls", "--dpi-desync-fake-quic",
-    "--dpi-desync-fake-http", "--dpi-desync-any-protocol", "--dpi-desync-cutoff",
-    "--dpi-desync-badseq-increment", "--dpi-desync-badack-increment", "--dpi-desync-fakedsplit",
-    "--dpi-desync-autottl", "--wssize", "--hostlist", "--hostlist-domains",
-    "--dpi-desync-start", "--dpi-desync-fake-syndata", "--dpi-desync-fake-unknown",
-}
-_PARAMS_RE = re.compile(r"^[A-Za-z0-9 =:,.\-_/+@]*$")
-_PARAMS_MAX = 1000
+# Валидация стратегии nfqws. Аргументы уходят в subprocess СПИСКОМ (без shell),
+# поэтому инъекция шелл-команд невозможна в принципе; задача валидации — отсечь
+# мусор и shell-метасимволы. Белый список конкретных флагов НЕ ведём (у zapret их
+# десятки и они меняются от версии к версии): принимаем любой корректный флаг
+# `--xxx[=value]` и разделитель секций `--new` (мульти-стратегии zapret), запрещая
+# опасные символы в значениях. Так нода принимает реальные конфиги zapret as-is,
+# включая `--filter-tcp/udp`, `--hostlist=/opt/...`, `--ipset=...`, `--dpi-desync-*`.
+_PARAMS_MAX = 8000           # мульти-секционные стратегии длинные
+_PARAMS_MAX_TOKENS = 400
+_FLAG_RE = re.compile(r"^--[a-z0-9][a-z0-9\-]{0,48}$")
+# значение после первого '=': пути (/opt/...), домены, числа, диапазоны (19294-19344),
+# списки (80,443), host=www.google.com (вложенный '='), фулинги ts,md5sig.
+_VALUE_RE = re.compile(r"^[A-Za-z0-9=:,.\-_/+@]*$")
 
 
 def validate_params(params):
-    """Параметры стратегии (строка nfqws-флагов) → (ok, tokens|error). Пусто = direct."""
+    """Строка nfqws-стратегии → (ok, tokens|error). Пусто = direct. Поддержка
+    мульти-секций (`--new`). Токены идут в subprocess СПИСКОМ (без shell)."""
     params = (params or "").strip()
     if not params:
         return True, []
     if len(params) > _PARAMS_MAX:
         return False, "слишком длинная строка стратегии"
-    if not _PARAMS_RE.match(params):
-        return False, "недопустимые символы в стратегии"
     toks = params.split()
+    if len(toks) > _PARAMS_MAX_TOKENS:
+        return False, "слишком много аргументов в стратегии"
     for t in toks:
-        flag = t.split("=", 1)[0]
-        if not flag.startswith("--"):
-            return False, f"ожидался флаг --xxx, а не «{t}»"
-        if flag not in _ALLOWED_FLAGS:
-            return False, f"флаг не в белом списке: {flag}"
+        if t == "--new":             # разделитель секций мульти-стратегии
+            continue
+        flag, sep, val = t.partition("=")
+        if not _FLAG_RE.match(flag):
+            return False, f"недопустимый флаг: «{t[:48]}»"
+        if sep and not _VALUE_RE.match(val):
+            return False, f"недопустимое значение во флаге {flag}"
     return True, toks
+
+
+def _collect_filter_ports(toks):
+    """Из токенов стратегии собрать порты/диапазоны `--filter-tcp`/`--filter-udp`
+    (по всем секциям) для построения NFQUEUE-правил. → {"tcp":[...], "udp":[...]}.
+    Значения вида '80,443' и '19294-19344' сохраняются как есть (дедуп по порядку)."""
+    tcp, udp = [], []
+    for t in toks:
+        flag, sep, val = t.partition("=")
+        if not sep or not val:
+            continue
+        if flag == "--filter-tcp":
+            tcp.extend(p for p in val.split(",") if p)
+        elif flag == "--filter-udp":
+            udp.extend(p for p in val.split(",") if p)
+    return {"tcp": list(dict.fromkeys(tcp)), "udp": list(dict.fromkeys(udp))}
+
+
+def _ports_to_multiport(ports):
+    """['80','443','19294-19344'] → '80,443,19294:19344' (формат iptables multiport)."""
+    return ",".join(p.replace("-", ":") for p in ports)
 
 
 # ── обнаружение zapret/привилегий ────────────────────────────────────────────
@@ -157,6 +182,7 @@ def check_baseline(service_keys, log_cb=None, stop_evt=None):
 # параметры провалидированы. Только в контейнере. В среде разработки не проверялось.
 _apply_lock = threading.Lock()
 _nfqws_proc = None
+_applied_rules = []          # установленные iptables-правила (для точного снятия)
 QUEUE_NUM = int(os.environ.get("ZAPRET_QUEUE_NUM", "200"))
 
 
@@ -190,14 +216,22 @@ def apply_strategy(params, log_cb=None):
                 else "применение выключено (ZAPRET_ENABLE_APPLY!=1)"
             log_cb(f"  обход НЕ применён: {reason} — меряю как есть (baseline)")
         return False
-    global _nfqws_proc
+    global _nfqws_proc, _applied_rules
     with _apply_lock:
         clear_strategy(log_cb)
         nf = nfqws_path()
-        # egress tcp 80/443 → NFQUEUE (контейнерные правила, host не трогаем)
-        for proto_args in (["-p", "tcp", "--dport", "80"], ["-p", "tcp", "--dport", "443"]):
-            _run_cmd(["iptables", "-t", "mangle", "-A", "POSTROUTING"] + proto_args
-                     + ["-j", "NFQUEUE", "--queue-num", str(QUEUE_NUM), "--queue-bypass"], log_cb)
+        # NFQUEUE-правила строим из портов стратегии (--filter-tcp/--filter-udp по всем
+        # секциям); если портов нет — дефолт tcp 80/443. Контейнерные правила, host не трогаем.
+        ports = _collect_filter_ports(toks)
+        specs = []
+        tcp_ports = ports["tcp"] or ["80", "443"]
+        specs.append(["-p", "tcp", "-m", "multiport", "--dports", _ports_to_multiport(tcp_ports)])
+        if ports["udp"]:
+            specs.append(["-p", "udp", "-m", "multiport", "--dports", _ports_to_multiport(ports["udp"])])
+        for sp in specs:
+            if _run_cmd(["iptables", "-t", "mangle", "-A", "POSTROUTING"] + sp
+                        + ["-j", "NFQUEUE", "--queue-num", str(QUEUE_NUM), "--queue-bypass"], log_cb):
+                _applied_rules.append(sp)
         try:
             _nfqws_proc = subprocess.Popen([nf, "--qnum", str(QUEUE_NUM)] + toks,
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -213,7 +247,7 @@ def apply_strategy(params, log_cb=None):
 
 def clear_strategy(log_cb=None):
     """Снять nfqws и iptables-правила (обратное к apply_strategy)."""
-    global _nfqws_proc
+    global _nfqws_proc, _applied_rules
     if _nfqws_proc is not None:
         try:
             _nfqws_proc.terminate()
@@ -222,10 +256,12 @@ def clear_strategy(log_cb=None):
             pass
         _nfqws_proc = None
     if not can_apply():
+        _applied_rules = []
         return
-    for proto_args in (["-p", "tcp", "--dport", "80"], ["-p", "tcp", "--dport", "443"]):
-        _run_cmd(["iptables", "-t", "mangle", "-D", "POSTROUTING"] + proto_args
+    for sp in _applied_rules:
+        _run_cmd(["iptables", "-t", "mangle", "-D", "POSTROUTING"] + sp
                  + ["-j", "NFQUEUE", "--queue-num", str(QUEUE_NUM), "--queue-bypass"], log_cb)
+    _applied_rules = []
 
 
 # ── оркестрация авто-теста (тестируемо: monkeypatch apply/clear/check_baseline) ──

@@ -641,8 +641,12 @@ def render_zapret(z, services, available, can_apply, node_id, csrf):
 Конечное применение обхода к трафику твоего телефона появится с роутер-нодой (#05) + прокси-шлюзом.</div>
 {banner}
 <div class="card"><div class="route-title">Стратегии</div>
-  <div class="help" style="margin:4px 0 10px">Параметры — флаги <span class="mono">nfqws</span>
-  (напр. <span class="mono">--dpi-desync=fake,split2 --dpi-desync-ttl=1</span>). Пусто = «direct» (без обхода).
+  <div class="help" style="margin:4px 0 10px">Параметры — флаги <span class="mono">nfqws</span>, можно
+  <b>вставить готовый конфиг zapret целиком</b>, в т.ч. мульти-секционный через
+  <span class="mono">--new</span> (напр. <span class="mono">--filter-udp=443 --dpi-desync=fake
+  --dpi-desync-fake-quic=/opt/zapret/bin/quic.bin --new --filter-tcp=80,443
+  --dpi-desync=hostfakesplit …</span>). Пути к листам/бинам (<span class="mono">--hostlist=…</span>,
+  <span class="mono">--ipset=…</span>) берутся как есть. Пусто = «direct» (без обхода).
   «Активная» — что применяется (авто-тест сам ставит лучшую, можно сменить).</div>
   <div id="zlist"></div>
   <button class="btn small" type="button" id="zadd">+ стратегия</button>
@@ -692,7 +696,7 @@ ZAPRET_JS = r"""
       c.appendChild(el('label',null,'Название'));
       var li=el('input'); li.value=s.label||''; li.placeholder='split2 / fake / direct'; li.addEventListener('input',function(){ s.label=li.value; }); c.appendChild(li);
       c.appendChild(el('label',null,'Параметры nfqws (пусто = direct)'));
-      var pi=el('textarea'); pi.className='mono'; pi.value=s.params||''; pi.placeholder='--dpi-desync=fake,split2 --dpi-desync-ttl=1'; pi.addEventListener('input',function(){ s.params=pi.value; }); c.appendChild(pi);
+      var pi=el('textarea'); pi.className='mono'; pi.rows=4; pi.value=s.params||''; pi.placeholder='Вставь конфиг zapret целиком (секции через --new), напр.:\n--filter-udp=443 --dpi-desync=fake --dpi-desync-fake-quic=/opt/zapret/bin/quic.bin --new\n--filter-tcp=80,443 --dpi-desync=hostfakesplit --dpi-desync-fooling=ts'; pi.addEventListener('input',function(){ s.params=pi.value; }); c.appendChild(pi);
       list.appendChild(c);
     });
     if(!Z.strategies.length) list.appendChild(el('div','help','Стратегий нет. Добавь «+ direct» для baseline-проверки доступности.'));

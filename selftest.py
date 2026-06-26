@@ -1030,19 +1030,43 @@ def t_autoselect_edges():
 
 # ── zapret (обход DPI): валидация, baseline, авто-тест, фоновый прогон, store ──
 def t_zapret_validate():
-    print("\n[44] zapret.validate_params: белый список флагов nfqws")
+    print("\n[44] zapret.validate_params: реальные nfqws-стратегии (мульти-секции)")
     ok, _ = zapret.validate_params("")
     check("пусто = direct (ok)", ok)
     ok, toks = zapret.validate_params("--dpi-desync=fake,split2 --dpi-desync-ttl=1")
     check("валидные флаги приняты", ok and toks, toks)
-    ok, _ = zapret.validate_params("--dpi-desync=fake; rm -rf /")
-    check("инъекция отклонена", not ok)
-    ok, _ = zapret.validate_params("--unknown-flag=1")
-    check("флаг не из белого списка отклонён", not ok)
+    # реальный мульти-секционный конфиг zapret (как присылает пользователь): QUIC/google,
+    # discord/stun по UDP-диапазонам, hostfakesplit с host=..., file-list пути, --new.
+    real = ("--filter-udp=443 --hostlist=/opt/zapret/lists/list-general.txt "
+            "--hostlist-exclude=/opt/zapret/lists/list-exclude.txt --dpi-desync=fake "
+            "--dpi-desync-repeats=6 --dpi-desync-fake-quic=/opt/zapret/bin/quic.bin --new "
+            "--filter-udp=19294-19344,50000-50100 --filter-l7=discord,stun --dpi-desync=fake "
+            "--dpi-desync-fake-discord=/opt/zapret/bin/q.bin --new "
+            "--filter-tcp=80,443 --hostlist=/opt/zapret/lists/list-general.txt "
+            "--dpi-desync=hostfakesplit --dpi-desync-fooling=ts,md5sig "
+            "--dpi-desync-hostfakesplit-mod=host=www.google.com --ip-id=zero")
+    ok, toks = zapret.validate_params(real)
+    check("реальный мульти-секционный конфиг принят", ok, toks if not ok else "")
+    check("секции --new сохранены в токенах", ok and toks.count("--new") == 2)
+    for bad in ("--dpi-desync=fake; rm -rf /", "--dpi-desync=fake `id`",
+                "--dpi-desync=$(whoami)", "--a=b|c", "--a=b&d"):
+        ok, _ = zapret.validate_params(bad)
+        check(f"shell-инъекция отклонена: {bad[:24]}", not ok)
     ok, _ = zapret.validate_params("notaflag")
     check("не-флаг отклонён", not ok)
-    ok, _ = zapret.validate_params("x" * 1100)
+    ok, _ = zapret.validate_params("x" * 8100)
     check("слишком длинная строка отклонена", not ok)
+    ok, _ = zapret.validate_params("--x=1 " * 401)
+    check("слишком много токенов отклонено", not ok)
+    # сбор портов из --filter-* для NFQUEUE-правил
+    _, toks = zapret.validate_params(real)
+    ports = zapret._collect_filter_ports(toks)
+    check("tcp-порты собраны", ports["tcp"] == ["80", "443"], ports["tcp"])
+    check("udp-порты+диапазоны собраны (дедуп)",
+          ports["udp"] == ["443", "19294-19344", "50000-50100"], ports["udp"])
+    check("диапазон → формат iptables multiport",
+          zapret._ports_to_multiport(ports["udp"]) == "443,19294:19344,50000:50100",
+          zapret._ports_to_multiport(ports["udp"]))
 
 
 def t_zapret_baseline():
@@ -1134,9 +1158,13 @@ def t_zapret_no_run_collision():
     _os.environ["ZAPRET_ENABLE_APPLY"] = "1"
     try:
         check("can_apply True при включении", zapret.can_apply() is True)
+        # установленное правило снимается ровно тем спеком, что и ставилось
+        zapret._applied_rules = [["-p", "tcp", "-m", "multiport", "--dports", "80,443"]]
         zapret.clear_strategy(lambda m: None)   # до фикса падало TypeError: dict not callable
         check("clear_strategy дошёл до iptables -D (хелпер вызван, не упал)",
               any("iptables" in c and "-D" in c for c in calls), calls)
+        check("снятый спек содержит multiport-порты",
+              any("--dports" in c and "80,443" in c for c in calls), calls)
     finally:
         zapret._run_cmd, zapret.is_available, zapret.nfqws_path = o_run, o_avail, o_path
         _os.environ.pop("ZAPRET_ENABLE_APPLY", None)
