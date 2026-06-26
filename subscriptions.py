@@ -14,6 +14,7 @@ import ssl
 import gzip
 import json
 import time
+import uuid
 import base64
 import threading
 import urllib.request
@@ -22,13 +23,17 @@ import urllib.parse
 UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "20"))
 CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
 
+# HWID/device — НЕ хардкодим реальный отпечаток. По умолчанию генерируем случайный
+# (стабильный в пределах запуска); для стабильности между рестартами задай HAPP_HWID.
+_DEFAULT_HWID = str(uuid.uuid4())
+
 UPSTREAM_HEADERS = {
     "User-Agent": os.environ.get("HAPP_UA", "Happ/2.16.2/Windows/2605221224603"),
     "X-App-Version": os.environ.get("HAPP_VERSION", "2.16.2"),
     "X-Device-Locale": "RU",
     "X-Device-Os": "Windows",
-    "X-Device-Model": "DESKTOP-0000000_x86_64",
-    "X-Hwid": os.environ.get("HAPP_HWID", "00000000-0000-0000-0000-000000000000"),
+    "X-Device-Model": os.environ.get("HAPP_DEVICE_MODEL", "DESKTOP-0000000_x86_64"),
+    "X-Hwid": os.environ.get("HAPP_HWID") or _DEFAULT_HWID,
     "X-Ver-Os": "10_10.0.19045",
     "Connection": "Keep-Alive",
     "Accept-Encoding": "gzip, deflate",
