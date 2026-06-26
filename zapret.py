@@ -358,9 +358,32 @@ def _run_cmd(cmd, log_cb):
         return False
 
 
+def _run_dir():
+    d = os.environ.get("ZAPRET_RUN_DIR") or "/tmp/zapret-run"
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return "/tmp"
+
+
+def _read_tail(path, n=12):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().strip().splitlines()
+        return " | ".join(lines[-n:])
+    except Exception:
+        return ""
+
+
 def apply_strategy(params, log_cb=None):
-    """Поднять nfqws со стратегией params и завернуть egress 80/443 в nfqueue.
-    → True если применено. Без can_apply() — no-op с логом (диагностика = baseline)."""
+    """Поднять nfqws со стратегией params и завернуть egress в nfqueue.
+    → True если применено. Без can_apply() — no-op с логом (диагностика = baseline).
+
+    Порядок и форма — КАК В proxy-zapret-panel (рабочий референс): nfqws стартует
+    ПЕРВЫМ из @-конфига (--qnum=N + стратегия), его вывод ЛОВИМ и проверяем, что он не
+    упал сразу (иначе обход тихо деградирует до baseline — это и был баг), и только потом
+    ставим NFQUEUE-правила."""
     ok, toks = validate_params(params)
     if not ok:
         if log_cb:
@@ -378,13 +401,36 @@ def apply_strategy(params, log_cb=None):
     with _apply_lock:
         clear_strategy(log_cb)
         nf = nfqws_path()
-        # NFQUEUE-правила строим из портов стратегии (--filter-tcp/--filter-udp по всем
-        # секциям); если портов нет — дефолт tcp 80/443. Контейнерные правила, host не трогаем.
+        # 1) nfqws ПЕРВЫМ из @-конфига; вывод → файл (чтобы видеть ошибки, а не DEVNULL).
+        conf = os.path.join(_run_dir(), "nfqws.conf")
+        nlog = os.path.join(_run_dir(), "nfqws.log")
+        try:
+            with open(conf, "w", encoding="utf-8") as f:
+                f.write(f"--qnum={QUEUE_NUM}\n{params.strip()}\n")
+        except Exception as e:
+            if log_cb:
+                log_cb(f"  не удалось записать конфиг nfqws: {e}")
+            return False
+        try:
+            logf = open(nlog, "w", encoding="utf-8")
+            _nfqws_proc = subprocess.Popen([nf, "@" + conf], stdout=logf, stderr=logf)
+            logf.close()
+        except Exception as e:
+            if log_cb:
+                log_cb(f"  не удалось запустить nfqws: {e}")
+            return False
+        time.sleep(0.6)
+        if _nfqws_proc.poll() is not None:        # упал сразу — покажем ПОЧЕМУ
+            rc = _nfqws_proc.returncode
+            _nfqws_proc = None
+            if log_cb:
+                log_cb(f"  ✗ nfqws упал сразу (rc={rc}): {_read_tail(nlog) or 'нет вывода'}")
+            return False
+        # 2) iptables ПОСЛЕ (nfqws жив): порты стратегии (--filter-tcp/udp) → NFQUEUE.
         ports = _collect_filter_ports(toks)
         if shutil.which("iptables") is None and log_cb:
             log_cb("  ⚠ iptables нет в контейнере — NFQUEUE-правила не поставить (трафик в очередь "
-                   "не пойдёт). Образ собран без iptables (Coolify/Nixpacks). Решение: Docker Compose "
-                   "build pack, либо узел доставит iptables сам на старте при ZAPRET=true (перезапусти).")
+                   "не пойдёт). Узел доустановит iptables на старте при ZAPRET=true (перезапусти).")
         specs = []
         tcp_ports = ports["tcp"] or ["80", "443"]
         specs.append(["-p", "tcp", "-m", "multiport", "--dports", _ports_to_multiport(tcp_ports)])
@@ -394,17 +440,10 @@ def apply_strategy(params, log_cb=None):
             if _run_cmd(["iptables", "-t", "mangle", "-A", "POSTROUTING"] + sp
                         + ["-j", "NFQUEUE", "--queue-num", str(QUEUE_NUM), "--queue-bypass"], log_cb):
                 _applied_rules.append(sp)
-        try:
-            _nfqws_proc = subprocess.Popen([nf, "--qnum", str(QUEUE_NUM)] + toks,
-                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if log_cb:
-                log_cb(f"  nfqws запущен (qnum={QUEUE_NUM}) со стратегией")
-            time.sleep(0.5)
-            return True
-        except Exception as e:
-            if log_cb:
-                log_cb(f"  не удалось запустить nfqws: {e}")
-            return False
+        if log_cb:
+            log_cb(f"  nfqws запущен (qnum={QUEUE_NUM}); порты tcp={','.join(tcp_ports)} "
+                   f"udp={','.join(ports['udp']) or '—'}")
+        return True
 
 
 def clear_strategy(log_cb=None):

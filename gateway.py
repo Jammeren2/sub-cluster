@@ -149,24 +149,37 @@ def _start_locked(g, strategy):
     except Exception as e:
         return f"запись конфига: {e}"
     xb = xray_path()
+    xlog = os.path.join(GATEWAY_DIR, "xray.log")
     try:
-        _xray_proc = subprocess.Popen([xb, "run", "-c", cfg_path],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        lf = open(xlog, "w", encoding="utf-8")
+        _xray_proc = subprocess.Popen([xb, "run", "-c", cfg_path], stdout=lf, stderr=lf)
+        lf.close()
     except Exception as e:
         return f"запуск xray: {e}"
-    time.sleep(0.4)
+    time.sleep(0.5)
     if _xray_proc.poll() is not None:
-        return f"xray упал сразу (rc={_xray_proc.returncode}) — проверь config.json"
+        return f"xray упал сразу (rc={_xray_proc.returncode}): {zapret._read_tail(xlog) or 'проверь config.json'}"
 
     # nfqws на egress, скоуп по fwmark (freedom 'direct' xray помечает GATEWAY_MARK):
     # NFQUEUE ловит только marked-пакеты → обходом затрагивается ровно zapret-таргетный трафик.
+    # nfqws — из @-конфига, вывод ловим, проверяем что не упал (как в zapret.apply_strategy).
     ok, toks = zapret.validate_params(strategy)
     if ok and toks:
         nf = zapret.nfqws_path()
         if nf:
+            conf = os.path.join(GATEWAY_DIR, "nfqws.conf")
+            nlog = os.path.join(GATEWAY_DIR, "nfqws.log")
             try:
-                _nfqws_proc = subprocess.Popen([nf, "--qnum", str(GATEWAY_QUEUE)] + toks,
-                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                with open(conf, "w", encoding="utf-8") as f:
+                    f.write(f"--qnum={GATEWAY_QUEUE}\n{strategy.strip()}\n")
+                lf = open(nlog, "w", encoding="utf-8")
+                _nfqws_proc = subprocess.Popen([nf, "@" + conf], stdout=lf, stderr=lf)
+                lf.close()
+                time.sleep(0.5)
+                if _nfqws_proc.poll() is not None:
+                    print(f"[gateway] nfqws упал сразу (rc={_nfqws_proc.returncode}): "
+                          f"{zapret._read_tail(nlog)}", flush=True)
+                    _nfqws_proc = None
             except Exception as e:
                 print(f"[gateway] nfqws: {e}", flush=True)
             ports = zapret._collect_filter_ports(toks)
