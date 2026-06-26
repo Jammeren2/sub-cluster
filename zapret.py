@@ -214,11 +214,18 @@ def _env_true(name):
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def apply_enabled():
+    """Главный рантайм-переключатель обхода/gateway. Читаем И ZAPRET (так его задаёт
+    пользователь в .env/Coolify), И ZAPRET_ENABLE_APPLY (его прокидывает compose) — чтобы
+    работало даже когда compose-маппинг не применился (Coolify/Nixpacks билд)."""
+    return _env_true("ZAPRET") or _env_true("ZAPRET_ENABLE_APPLY")
+
+
 def can_apply():
     """Реально применять обход к egress — только при явном согласии (защита от случайной
     правки сети непротестированным кодом). Включается ZAPRET=true (ZAPRET_ENABLE_APPLY).
     Иначе авто-тест = только baseline."""
-    return is_available() and _env_true("ZAPRET_ENABLE_APPLY")
+    return is_available() and apply_enabled()
 
 
 def unavailable_reason():
@@ -226,12 +233,12 @@ def unavailable_reason():
     if not sys.platform.startswith("linux"):
         return "узел не на Linux (nfqws работает только на Linux)"
     if nfqws_path() is None:
-        if _env_true("ZAPRET_ENABLE_APPLY"):
+        if apply_enabled():
             return ("nfqws доустанавливается в фоне (скачивается с GitHub) — обнови страницу "
                     "через ~1 мин; если не появилось, смотри логи контейнера")
         return ("nfqws не найден — задай ZAPRET=true в .env (узел сам доустановит nfqws/xray "
                 "на старте) и перезапусти контейнер")
-    if not _env_true("ZAPRET_ENABLE_APPLY"):
+    if not apply_enabled():
         return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
     return ""
 

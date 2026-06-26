@@ -58,17 +58,17 @@ def is_available():
 
 def can_apply():
     """Реально поднимать xray/nfqws на узле — только при явном согласии (как у zapret)."""
-    return is_available() and zapret._env_true("ZAPRET_ENABLE_APPLY")
+    return is_available() and zapret.apply_enabled()
 
 
 def unavailable_reason():
     if not sys.platform.startswith("linux"):
         return "узел не на Linux (gateway работает только на Linux)"
     if xray_path() is None:
-        if zapret._env_true("ZAPRET_ENABLE_APPLY"):
+        if zapret.apply_enabled():
             return "xray доустанавливается в фоне (скачивается с GitHub) — обнови через ~1 мин"
         return "xray не найден — задай ZAPRET=true в .env (узел сам доустановит на старте) и перезапусти"
-    if not zapret._env_true("ZAPRET_ENABLE_APPLY"):
+    if not zapret.apply_enabled():
         return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
     return ""
 

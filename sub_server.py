@@ -788,7 +788,7 @@ def _start_gateway_boot():
     через Coolify/Nixpacks, где наш Dockerfile может не выполняться), затем поднять gateway."""
     def _run():
         try:
-            if zapret._env_true("ZAPRET_ENABLE_APPLY"):
+            if zapret.apply_enabled():
                 provision.ensure_all(lambda m: print(m, flush=True))
             gateway.reconcile(STORE)
         except Exception as e:
