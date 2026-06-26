@@ -1,0 +1,22 @@
+[
+  {"id":"builtin-general","file":"general.txt","name":"General ⭐ (try first)","test":"www.youtube.com"},
+  {"id":"builtin-general-alt","file":"general-alt.txt","name":"ALT","test":"www.youtube.com"},
+  {"id":"builtin-general-alt2","file":"general-alt2.txt","name":"ALT2","test":"www.youtube.com"},
+  {"id":"builtin-general-alt3","file":"general-alt3.txt","name":"ALT3","test":"www.youtube.com"},
+  {"id":"builtin-general-alt4","file":"general-alt4.txt","name":"ALT4","test":"www.youtube.com"},
+  {"id":"builtin-general-alt5","file":"general-alt5.txt","name":"ALT5","test":"www.youtube.com"},
+  {"id":"builtin-general-alt6","file":"general-alt6.txt","name":"ALT6","test":"www.youtube.com"},
+  {"id":"builtin-general-alt7","file":"general-alt7.txt","name":"ALT7","test":"www.youtube.com"},
+  {"id":"builtin-general-alt8","file":"general-alt8.txt","name":"ALT8","test":"www.youtube.com"},
+  {"id":"builtin-general-alt9","file":"general-alt9.txt","name":"ALT9","test":"www.youtube.com"},
+  {"id":"builtin-general-alt10","file":"general-alt10.txt","name":"ALT10","test":"www.youtube.com"},
+  {"id":"builtin-general-alt11","file":"general-alt11.txt","name":"ALT11","test":"www.youtube.com"},
+  {"id":"builtin-general-alt12","file":"general-alt12.txt","name":"ALT12","test":"www.youtube.com"},
+  {"id":"builtin-general-fake-tls-auto","file":"general-fake-tls-auto.txt","name":"FAKE TLS AUTO","test":"www.youtube.com"},
+  {"id":"builtin-general-fake-tls-auto-alt","file":"general-fake-tls-auto-alt.txt","name":"FAKE TLS AUTO ALT","test":"www.youtube.com"},
+  {"id":"builtin-general-fake-tls-auto-alt2","file":"general-fake-tls-auto-alt2.txt","name":"FAKE TLS AUTO ALT2","test":"www.youtube.com"},
+  {"id":"builtin-general-fake-tls-auto-alt3","file":"general-fake-tls-auto-alt3.txt","name":"FAKE TLS AUTO ALT3","test":"www.youtube.com"},
+  {"id":"builtin-general-simple-fake","file":"general-simple-fake.txt","name":"SIMPLE FAKE","test":"www.youtube.com"},
+  {"id":"builtin-general-simple-fake-alt","file":"general-simple-fake-alt.txt","name":"SIMPLE FAKE ALT","test":"www.youtube.com"},
+  {"id":"builtin-general-simple-fake-alt2","file":"general-simple-fake-alt2.txt","name":"SIMPLE FAKE ALT2","test":"www.youtube.com"}
+]

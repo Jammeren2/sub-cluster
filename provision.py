@@ -176,9 +176,29 @@ def ensure_iptables(log=print):
         return False
 
 
+def ensure_assets(log=print):
+    """flowseal-данные (hostlists + fake-payload'ы) → /opt/zapret/{lists,bin}, если их нет.
+    Бандлятся в образ из репо (/app/assets/zapret); это рантайм-фолбэк, если Dockerfile-COPY
+    не отработал. Без них стратегии flowseal не дают эффекта (ссылаются на эти пути)."""
+    import shutil
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "zapret")
+    if not sys.platform.startswith("linux"):
+        return
+    for sub in ("bin", "lists"):
+        s, d = os.path.join(src, sub), "/opt/zapret/" + sub
+        try:
+            if os.path.isdir(s) and not os.path.isdir(d):
+                os.makedirs("/opt/zapret", exist_ok=True)
+                shutil.copytree(s, d)
+                log(f"[provision] flowseal {sub} → {d}")
+        except Exception as e:
+            log(f"[provision] copy {sub}: {e}")
+
+
 def ensure_all(log=print):
-    """Доустановить iptables + nfqws + xray, если их нет (на старте, при ZAPRET=true).
-    iptables первым — он тянет libcap2-bin (setcap) для последующей раздачи caps бинарникам."""
+    """Доустановить iptables + nfqws + xray + flowseal-данные, если их нет (на старте, при
+    ZAPRET=true). iptables первым — тянет libcap2-bin (setcap) для раздачи caps бинарникам."""
     ensure_iptables(log)
     ensure_zapret(log)
     ensure_xray(log)
+    ensure_assets(log)

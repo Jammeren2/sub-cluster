@@ -21,6 +21,7 @@ zapret.py — каркас ноды zapret (обход DPI) + авто-тест 
 import os
 import re
 import sys
+import json
 import time
 import shutil
 import socket
@@ -60,22 +61,46 @@ PROBE_TIMEOUT = float(os.environ.get("ZAPRET_PROBE_TIMEOUT", "4"))
 # Каталог fake-payload'ов в установленном zapret (bol-van/zapret). Переопределяется env.
 ZAPRET_FAKE_DIR = (os.environ.get("ZAPRET_FAKE_DIR") or "/opt/zapret/files/fake").rstrip("/")
 
-# Набор стратегий «по умолчанию» (кнопка «+ набор по умолчанию» в UI). Канонические
-# nfqws-стратегии из zapret (bol-van): самодостаточные (без --hostlist, применяются ко
-# всему трафику на queued-портах). QUIC-фейки ссылаются на shipped-файлы под ZAPRET_FAKE_DIR.
+# Бандл flowseal/zapret-discord-youtube: рабочие стратегии + hostlists + fake-payload'ы
+# (assets/zapret/{strategies,lists,bin} в репо → /opt/zapret/{lists,bin} в образе).
+# Это РЕАЛЬНО РАБОТАЮЩИЙ набор (как в proxy-zapret-panel): стратегии ссылаются на
+# /opt/zapret/lists/*.txt и /opt/zapret/bin/*.bin, поэтому без этих файлов они не дают
+# эффекта. Provision/Dockerfile кладут файлы на место.
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "zapret")
+
+
+def _load_flowseal():
+    """Стратегии flowseal из assets/zapret/strategies/manifest.json → [{label, params}]."""
+    out, mdir = [], os.path.join(_ASSETS_DIR, "strategies")
+    try:
+        with open(os.path.join(mdir, "manifest.json"), encoding="utf-8") as f:
+            metas = json.load(f)
+    except Exception:
+        return out
+    for m in metas:
+        try:
+            with open(os.path.join(mdir, m.get("file", "")), encoding="utf-8") as f:
+                params = f.read().strip()
+        except Exception:
+            continue
+        if params:
+            out.append({"label": m.get("name") or m.get("id") or "", "params": params})
+    return out
+
+
 def _default_strategies():
+    """«+ набор по умолчанию»: baseline + рабочие flowseal-стратегии + простой фолбэк
+    без листов. Flowseal — первыми (их и надо пробовать; «General ⭐» — топ)."""
     q = ZAPRET_FAKE_DIR + "/quic_initial_www_google_com.bin"
-    return [
-        {"label": "Прямой (baseline)", "params": ""},
-        {"label": "TCP fake+split2 ttl=1", "params": "--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-ttl=1"},
-        {"label": "TCP fake+split2 md5sig", "params": "--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-fooling=md5sig"},
-        {"label": "TCP fake+disorder2 badseq", "params": "--filter-tcp=80,443 --dpi-desync=fake,disorder2 --dpi-desync-fooling=badseq"},
-        {"label": "TCP fakedsplit pos=1", "params": "--filter-tcp=80,443 --dpi-desync=fakedsplit --dpi-desync-split-pos=1 --dpi-desync-ttl=1"},
-        {"label": "TCP multisplit", "params": "--filter-tcp=80,443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld"},
-        {"label": "TCP syndata", "params": "--filter-tcp=80,443 --dpi-desync=syndata"},
-        {"label": "QUIC/UDP 443 fake", "params": f"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic={q}"},
-        {"label": "Комбо TCP+QUIC", "params": f"--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-ttl=1 --new --filter-udp=443 --dpi-desync=fake --dpi-desync-fake-quic={q}"},
+    base = [{"label": "Прямой (baseline)", "params": ""}]
+    fs = _load_flowseal()
+    fallback = [
+        {"label": "Simple fake+multisplit (без листов)",
+         "params": "--filter-tcp=80,443 --dpi-desync=fake,multisplit --dpi-desync-ttl=4 --dpi-desync-autottl=2"},
+        {"label": "Simple QUIC/UDP 443",
+         "params": f"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic={q}"},
     ]
+    return base + fs + fallback
 
 
 DEFAULT_STRATEGIES = _default_strategies()
@@ -127,8 +152,9 @@ _PARAMS_MAX = 8000           # мульти-секционные стратег�
 _PARAMS_MAX_TOKENS = 400
 _FLAG_RE = re.compile(r"^--[a-z0-9][a-z0-9\-]{0,48}$")
 # значение после первого '=': пути (/opt/...), домены, числа, диапазоны (19294-19344),
-# списки (80,443), host=www.google.com (вложенный '='), фулинги ts,md5sig.
-_VALUE_RE = re.compile(r"^[A-Za-z0-9=:,.\-_/+@]*$")
+# списки (80,443), host=www.google.com (вложенный '='), фулинги ts,md5sig, hex 0x00,
+# '!' (nfqws-маркер «встроенный fake»). Все безопасны: аргументы уходят списком, без shell.
+_VALUE_RE = re.compile(r"^[A-Za-z0-9=:,.\-_/+@!]*$")
 
 
 def validate_params(params):

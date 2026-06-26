@@ -6,6 +6,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
 COPY *.py editor.js editor.css ./
+# flowseal-данные (стратегии + hostlists + fake-payload'ы) — приложение читает стратегии
+# из /app/assets, а nfqws — листы/бины из /opt/zapret/{lists,bin} (см. ниже).
+COPY assets ./assets
 
 # zapret (обход DPI) — ОПЦИОНАЛЬНО, по умолчанию ВЫКЛЮЧЕНО (образ не пухнет,
 # поведение не меняется). Включить: docker build --build-arg INSTALL_ZAPRET=1 ...
@@ -39,6 +42,11 @@ RUN if [ "$INSTALL_ZAPRET" = "1" ] || [ "$INSTALL_ZAPRET" = "true" ]; then \
       ( setcap cap_net_admin,cap_net_raw+ep /opt/xray/xray || echo "WARN: setcap xray не удался" ) && \
       chmod -R a+rX /opt/xray ; \
     fi
+# flowseal hostlists + fake-payload'ы → /opt/zapret/{lists,bin} (стратегии ссылаются на эти
+# пути). COPY безусловный — данные в образе всегда, даже если блок установки nfqws пропущен.
+COPY assets/zapret/lists/ /opt/zapret/lists/
+COPY assets/zapret/bin/   /opt/zapret/bin/
+
 # Пути к nfqws/fake (zapret) и xray/geo (gateway). Если ZAPRET!=true — файлов нет,
 # is_available()=False у обоих → /zapret и gateway дают только генерацию/ссылку.
 ENV ZAPRET_NFQWS=/opt/zapret/binaries/linux-x86_64/nfqws \
