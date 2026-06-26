@@ -30,7 +30,7 @@ def js_embed(obj):
 
 
 NAV_ITEMS = [("/", "Граф"), ("/classic", "Список"), ("/cluster", "Кластер"),
-             ("/stats", "Статистика"), ("/settings", "Настройки")]
+             ("/stats", "Статистика"), ("/zapret", "zapret"), ("/settings", "Настройки")]
 
 
 def nav_links(active):
@@ -78,6 +78,19 @@ legend{color:#cfd3da;font-size:13px;padding:0 6px}
 .domtbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
 .domtbl th,.domtbl td{text-align:left;padding:7px 9px;border-bottom:1px solid #232833}
 .domtbl th{color:#8a93a2;font-weight:600;font-size:12px}
+/* zapret */
+.zcard{background:#12151b;border:1px solid #232833;border-radius:10px;padding:12px 14px;margin-bottom:10px}
+.zsvcs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.zchk{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#cfd3da;background:#1c1f27;border:1px solid #2b313d;border-radius:6px;padding:3px 8px;cursor:pointer}
+.zmodal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:200}
+.zmodal.show{display:flex}
+.zbox{background:#171a21;border:1px solid #2b313d;border-radius:12px;width:min(820px,94vw);max-height:88vh;display:flex;flex-direction:column}
+.zbox .zhd{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 16px;border-bottom:1px solid #232833}
+.zlog{flex:1;overflow:auto;padding:10px 14px;font-family:ui-monospace,Consolas,monospace;font-size:12px;white-space:pre-wrap;line-height:1.45;background:#0f1115;color:#cfd3da;min-height:180px}
+.zgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;padding:10px 14px;border-top:1px solid #232833}
+.zsvc{display:flex;align-items:center;gap:7px;font-size:12px;padding:4px 8px;border:1px solid #232833;border-radius:6px}
+.zdot{width:9px;height:9px;border-radius:50%;flex:none;background:#43454e}
+.zdot.up{background:#3fb950}.zdot.down{background:#f85149}
 """
 
 
@@ -594,3 +607,145 @@ def render_stats(stats, routes, node_id, sub_base):
 <form class="inline" method="post" action="/stats/reset" style="margin-top:8px">
   <button class="btn small ghost" type="submit" onclick="return confirm('Сбросить статистику по всему кластеру?')">Сбросить всё (по кластеру)</button></form>
 </div></body></html>"""
+
+
+# ── zapret (обход DPI): стратегии + авто-тест ───────────────────────────────
+def render_zapret(z, services, available, can_apply, node_id, csrf):
+    z_ui = {
+        "strategies": [{"id": s.get("id", ""), "label": s.get("label", ""), "params": s.get("params", "")}
+                       for s in (z.get("strategies") or [])],
+        "active_id": z.get("active_id") or "",
+        "services": [{"key": s["key"], "label": s["label"]} for s in services],
+        "available": bool(available), "can_apply": bool(can_apply), "node": node_id,
+    }
+    if not available:
+        banner = ('<div class="flash err">zapret недоступен на этом узле (нет бинарника nfqws или не Linux). '
+                  'Авто-тест покажет ТОЛЬКО базовую доступность сервисов <b>без обхода</b>. Поставь zapret в образ '
+                  '(Dockerfile) + cap NET_ADMIN/NET_RAW, чтобы тестировать стратегии.</div>')
+    elif not can_apply:
+        banner = ('<div class="flash">zapret найден, но применение обхода выключено — задай '
+                  '<span class="mono">ZAPRET_ENABLE_APPLY=1</span> на узле, чтобы авто-тест реально применял стратегии. '
+                  'Сейчас — только baseline (доступность без обхода).</div>')
+    else:
+        banner = ('<div class="flash">zapret активен: авто-тест применяет стратегии к egress контейнера и меряет '
+                  'доступность. Реальный обход для трафика клиентов появится с роутер-нодой (#05).</div>')
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>zapret — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
+<body><div class="wrap">
+<h1>zapret — обход DPI (диагностика)</h1>
+<div style="margin:8px 0 16px">{nav_links("/zapret")}</div>
+<div class="muted" style="margin-bottom:12px">Узел: <b>{esc(node_id)}</b>. Это <b>выбор стратегии и проверка
+доступности НА УЗЛЕ</b> — авто-тест меряет, какие из заблокированных сервисов доступны (с обходом и без).
+Конечное применение обхода к трафику твоего телефона появится с роутер-нодой (#05) + прокси-шлюзом.</div>
+{banner}
+<div class="card"><div class="route-title">Стратегии</div>
+  <div class="help" style="margin:4px 0 10px">Параметры — флаги <span class="mono">nfqws</span>
+  (напр. <span class="mono">--dpi-desync=fake,split2 --dpi-desync-ttl=1</span>). Пусто = «direct» (без обхода).
+  «Активная» — что применяется (авто-тест сам ставит лучшую, можно сменить).</div>
+  <div id="zlist"></div>
+  <button class="btn small" type="button" id="zadd">+ стратегия</button>
+  <button class="btn small gray" type="button" id="zdirect">+ direct</button>
+  <button class="btn small primary" type="button" id="zsave">Сохранить стратегии</button>
+</div>
+<div class="card"><div class="route-title">Сервисы для теста</div>
+  <div class="zsvcs" id="zsvcs"></div>
+  <div style="margin-top:12px"><button class="btn primary" type="button" id="zrun">Запустить авто-тест</button></div>
+</div>
+<div class="zmodal" id="zmodal"><div class="zbox">
+  <div class="zhd"><b>Авто-тест zapret</b><span id="zbest" class="muted"></span>
+    <span class="spacer" style="flex:1"></span>
+    <button class="btn small red" type="button" id="zstop">Стоп</button>
+    <button class="btn small gray" type="button" id="zclose">Свернуть</button></div>
+  <div class="zlog" id="zlog"></div>
+  <div class="zgrid" id="zgrid"></div>
+</div></div>
+<div id="ztoast" style="position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#2c2c30;border:1px solid #444;padding:10px 16px;border-radius:9px;z-index:300;display:none;font-size:13px"></div>
+<script>window.__ZAP__={js_embed(z_ui)};window.__ZCSRF__={js_embed(csrf)};</script>
+<script>{ZAPRET_JS}</script>
+</div></body></html>"""
+
+
+ZAPRET_JS = r"""
+(function(){
+  var Z = window.__ZAP__ || {strategies:[],active_id:'',services:[],available:false,can_apply:false,node:''};
+  var CSRF = window.__ZCSRF__ || '';
+  var list=document.getElementById('zlist'), svcBox=document.getElementById('zsvcs');
+  var modal=document.getElementById('zmodal'), logEl=document.getElementById('zlog');
+  var gridEl=document.getElementById('zgrid'), bestEl=document.getElementById('zbest');
+  function el(t,c,x){ var e=document.createElement(t); if(c)e.className=c; if(x!=null)e.textContent=x; return e; }
+  function toast(m){ var t=document.getElementById('ztoast'); if(!t)return; t.textContent=m; t.style.display='block'; setTimeout(function(){t.style.display='none';},2500); }
+  function genId(){ try{var a=new Uint8Array(6);crypto.getRandomValues(a);return Array.from(a,function(b){return b.toString(16).padStart(2,'0');}).join('');}catch(e){return 'id'+Math.floor(Math.random()*1e9).toString(16);} }
+
+  function render(){
+    list.textContent='';
+    Z.strategies.forEach(function(s,i){
+      var c=el('div','zcard'), row=el('div','row');
+      var rad=el('input'); rad.type='radio'; rad.name='zactive'; rad.checked=(Z.active_id===s.id); rad.style.width='auto';
+      rad.addEventListener('change',function(){ Z.active_id=s.id; });
+      var lr=el('label','chk'); lr.appendChild(rad); lr.appendChild(el('span',null,'активная')); row.appendChild(lr);
+      var sp=el('span'); sp.style.flex='1'; row.appendChild(sp);
+      var del=el('button','btn small red','Удалить'); del.type='button';
+      del.addEventListener('click',function(){ Z.strategies.splice(i,1); if(Z.active_id===s.id)Z.active_id=''; render(); });
+      row.appendChild(del); c.appendChild(row);
+      c.appendChild(el('label',null,'Название'));
+      var li=el('input'); li.value=s.label||''; li.placeholder='split2 / fake / direct'; li.addEventListener('input',function(){ s.label=li.value; }); c.appendChild(li);
+      c.appendChild(el('label',null,'Параметры nfqws (пусто = direct)'));
+      var pi=el('textarea'); pi.className='mono'; pi.value=s.params||''; pi.placeholder='--dpi-desync=fake,split2 --dpi-desync-ttl=1'; pi.addEventListener('input',function(){ s.params=pi.value; }); c.appendChild(pi);
+      list.appendChild(c);
+    });
+    if(!Z.strategies.length) list.appendChild(el('div','help','Стратегий нет. Добавь «+ direct» для baseline-проверки доступности.'));
+  }
+  document.getElementById('zadd').addEventListener('click',function(){ Z.strategies.push({id:genId(),label:'',params:''}); render(); });
+  document.getElementById('zdirect').addEventListener('click',function(){ Z.strategies.push({id:genId(),label:'Прямой (без обхода)',params:''}); render(); });
+
+  Z.services.forEach(function(sv){
+    var lab=el('label','zchk'); var cb=el('input'); cb.type='checkbox'; cb.checked=true; cb.dataset.k=sv.key; cb.style.width='auto';
+    lab.appendChild(cb); lab.appendChild(el('span',null,sv.label)); svcBox.appendChild(lab);
+  });
+  function selectedServices(){ return Array.prototype.slice.call(svcBox.querySelectorAll('input:checked')).map(function(c){return c.dataset.k;}); }
+
+  function post(url,body){ return fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify(body||{})}).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});}); }
+  document.getElementById('zsave').addEventListener('click',function(){
+    post('/zapret/save',{strategies:Z.strategies,active_id:Z.active_id})
+      .then(function(r){ toast(r.j&&r.j.ok?'Сохранено ✓':('Ошибка: '+((r.j&&r.j.error)||''))); })
+      .catch(function(){ toast('Сервер недоступен'); });
+  });
+
+  var poll=null, cursor=0;
+  function closeModal(){ modal.classList.remove('show'); if(poll){clearInterval(poll);poll=null;} }
+  document.getElementById('zclose').addEventListener('click',closeModal);
+  document.getElementById('zstop').addEventListener('click',function(){ post('/zapret/test/stop',{}); });
+  function appendLogs(rows){ rows.forEach(function(r){ logEl.appendChild(document.createTextNode((r.msg||'')+'\n')); }); logEl.scrollTop=logEl.scrollHeight; }
+  function renderResults(st){
+    if(!st.results){ return; }
+    var res=st.results, best=st.best_id;
+    bestEl.textContent = (best && res[best]) ? ('лучшая: '+res[best].label+' — '+res[best].up_count) : '';
+    var shown = (best && res[best]) ? res[best].services : (Object.keys(res).length?res[Object.keys(res)[0]].services:{});
+    gridEl.textContent='';
+    Object.keys(shown||{}).forEach(function(k){
+      var v=shown[k]||{}; var d=el('div','zsvc');
+      d.appendChild(el('span','zdot'+(v.up?' up':' down')));
+      d.appendChild(el('span',null,k)); gridEl.appendChild(d);
+    });
+  }
+  function tick(){
+    fetch('/zapret/test/status?cursor='+cursor).then(function(r){return r.json();}).then(function(st){
+      if(st.logs&&st.logs.length){ appendLogs(st.logs); cursor=st.cursor; }
+      renderResults(st);
+      if(st.state!=='running'){ if(poll){clearInterval(poll);poll=null;} document.getElementById('zstop').disabled=true; }
+    }).catch(function(){});
+  }
+  document.getElementById('zrun').addEventListener('click',function(){
+    logEl.textContent=''; gridEl.textContent=''; bestEl.textContent=''; cursor=0;
+    document.getElementById('zstop').disabled=false; modal.classList.add('show');
+    post('/zapret/test/start',{strategy_ids:Z.strategies.map(function(s){return s.id;}),service_keys:selectedServices()})
+      .then(function(r){
+        if(!r.j||!r.j.ok){ appendLogs([{msg:'Не запущено: '+((r.j&&r.j.error)||'ошибка')}]); document.getElementById('zstop').disabled=true; return; }
+        if(poll)clearInterval(poll); poll=setInterval(tick,1000); tick();
+      }).catch(function(){ appendLogs([{msg:'Сервер недоступен'}]); });
+  });
+
+  render();
+})();
+"""

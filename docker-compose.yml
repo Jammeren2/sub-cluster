@@ -49,6 +49,12 @@ services:
       CACHE_TTL: "${CACHE_TTL:-60}"
     volumes:
       - cluster-data:/data
+    # zapret (обход DPI, roadmap/04) — раскомментируй ТОЛЬКО если собрал образ с
+    # --build-arg INSTALL_ZAPRET=1 и хочешь, чтобы авто-тест применял стратегии
+    # (плюс ZAPRET_ENABLE_APPLY=1 в env). Иначе не нужно — /zapret даёт baseline.
+    # cap_add:
+    #   - NET_ADMIN
+    #   - NET_RAW
     # чтобы контейнер мог дёрнуть локальный redeploy-вебхук на хосте (если используешь агент)
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -52,6 +52,9 @@ DEFAULT_CONFIG = {
             # фейловерится отдельно (на свой активный узел). См. graph.domain_*.
             "domains": [],
         },
+        # zapret (обход DPI, roadmap/04): список стратегий + активная. Логи теста —
+        # эфемерные (в памяти узла, не синкаются). См. zapret.py.
+        "zapret": {"strategies": [], "active_id": ""},
     },
 }
 
@@ -215,6 +218,12 @@ class Store:
         if not isinstance(dns.get("domains"), list):
             dns["domains"] = []
         s["dns"] = dns
+        z = dict(DEFAULT_CONFIG["settings"]["zapret"])
+        z.update((cfg.get("settings") or {}).get("zapret") or {})
+        if not isinstance(z.get("strategies"), list):
+            z["strategies"] = []
+        z["active_id"] = str(z.get("active_id") or "")
+        s["zapret"] = z
         return s
 
     def get_failover(self):

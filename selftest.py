@@ -21,6 +21,7 @@ import graph                      # noqa: E402
 import subscriptions as subs      # noqa: E402
 import dns_providers              # noqa: E402
 import cluster as clustermod      # noqa: E402
+import zapret                     # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -1027,6 +1028,121 @@ def t_autoselect_edges():
     check("auto→route сохранено", any(e["from"] == "a1aaaaaa" and e["to"] == "r1cccccc" for e in edges))
 
 
+# ── zapret (обход DPI): валидация, baseline, авто-тест, фоновый прогон, store ──
+def t_zapret_validate():
+    print("\n[44] zapret.validate_params: белый список флагов nfqws")
+    ok, _ = zapret.validate_params("")
+    check("пусто = direct (ok)", ok)
+    ok, toks = zapret.validate_params("--dpi-desync=fake,split2 --dpi-desync-ttl=1")
+    check("валидные флаги приняты", ok and toks, toks)
+    ok, _ = zapret.validate_params("--dpi-desync=fake; rm -rf /")
+    check("инъекция отклонена", not ok)
+    ok, _ = zapret.validate_params("--unknown-flag=1")
+    check("флаг не из белого списка отклонён", not ok)
+    ok, _ = zapret.validate_params("notaflag")
+    check("не-флаг отклонён", not ok)
+    ok, _ = zapret.validate_params("x" * 1100)
+    check("слишком длинная строка отклонена", not ok)
+
+
+def t_zapret_baseline():
+    print("\n[45] zapret.check_baseline (monkeypatch _probe)")
+    orig = zapret._probe
+    up = {"discord.com"}
+    zapret._probe = lambda host, **kw: host in up
+    try:
+        res = zapret.check_baseline(["discord", "youtube"])
+        check("discord доступен", res["discord"]["up"] is True)
+        check("youtube недоступен", res["youtube"]["up"] is False)
+    finally:
+        zapret._probe = orig
+
+
+def t_zapret_autotest_best():
+    print("\n[46] zapret.run_autotest выбирает лучшую стратегию")
+    import threading as _t
+    o_apply, o_clear, o_base = zapret.apply_strategy, zapret.clear_strategy, zapret.check_baseline
+    cur = {"p": None}
+    zapret.apply_strategy = lambda params, log_cb=None: (cur.__setitem__("p", params) or True)
+    zapret.clear_strategy = lambda log_cb=None: cur.__setitem__("p", None)
+    zapret.check_baseline = lambda keys, log_cb=None, stop_evt=None: \
+        {k: {"up": (cur["p"] == "--dpi-desync=fake"), "domains": {}} for k in keys}
+    try:
+        results, best = zapret.run_autotest(
+            [{"id": "a", "label": "Direct", "params": ""},
+             {"id": "b", "label": "Fake", "params": "--dpi-desync=fake"}],
+            ["discord", "youtube"], None, _t.Event())
+        check("лучшая — стратегия с большим числом доступных", best == "b", best)
+        check("у лучшей up_count=2", results["b"]["up_count"] == 2, results["b"])
+        check("у direct up_count=0", results["a"]["up_count"] == 0)
+    finally:
+        zapret.apply_strategy, zapret.clear_strategy, zapret.check_baseline = o_apply, o_clear, o_base
+
+
+def t_zapret_runstate():
+    print("\n[47] zapret фоновый прогон: один тест за раз, состояние idle→running→done")
+    import time as _tm, threading as _t
+    o_run = zapret.run_autotest
+    gate = _t.Event()
+
+    def fake_run(strategies, service_keys, log_cb=None, stop_evt=None):
+        if log_cb:
+            log_cb("старт")
+        gate.wait(3)
+        return ({"x": {"label": "X", "up_count": 1, "services": {}}}, "x")
+    zapret.run_autotest = fake_run
+    try:
+        check("тест запущен", zapret.start_test([{"id": "x"}], ["discord"]) is True)
+        check("повторный старт отклонён (уже идёт)", zapret.start_test([], []) is False)
+        check("состояние running", zapret.test_status(0)["state"] == "running")
+        gate.set()
+        done = False
+        for _ in range(40):
+            if zapret.test_status(0)["state"] == "done":
+                done = True
+                break
+            _tm.sleep(0.05)
+        check("состояние done после завершения", done)
+        check("best_id зафиксирован", zapret.test_status(0)["best_id"] == "x")
+    finally:
+        zapret.run_autotest = o_run
+        gate.set()
+
+
+def t_zapret_store():
+    print("\n[48] settings.zapret по умолчанию + коэрция")
+    st = new_store()
+    z = st.get_settings().get("zapret")
+    check("zapret в настройках по умолчанию", isinstance(z, dict)
+          and z.get("strategies") == [] and z.get("active_id") == "", z)
+    st.update_config(lambda cfg: cfg.setdefault("settings", {}).__setitem__(
+        "zapret", {"strategies": "bad", "active_id": 123}))
+    z2 = st.get_settings().get("zapret")
+    check("strategies коэрцится в список", z2["strategies"] == [], z2)
+    check("active_id коэрцится в строку", z2["active_id"] == "123", z2)
+
+
+def t_zapret_no_run_collision():
+    print("\n[49] zapret: привилегированный путь доходит до subprocess (нет коллизии _run)")
+    import os as _os
+    check("_run_cmd — функция (не затёрта dict-ом _run)", callable(zapret._run_cmd))
+    calls = []
+    o_run, o_avail, o_path = zapret._run_cmd, zapret.is_available, zapret.nfqws_path
+    zapret._run_cmd = lambda cmd, log_cb=None: (calls.append(cmd) or True)
+    zapret.is_available = lambda: True
+    zapret.nfqws_path = lambda: "/bin/true"
+    _os.environ["ZAPRET_ENABLE_APPLY"] = "1"
+    try:
+        check("can_apply True при включении", zapret.can_apply() is True)
+        zapret.clear_strategy(lambda m: None)   # до фикса падало TypeError: dict not callable
+        check("clear_strategy дошёл до iptables -D (хелпер вызван, не упал)",
+              any("iptables" in c and "-D" in c for c in calls), calls)
+    finally:
+        zapret._run_cmd, zapret.is_available, zapret.nfqws_path = o_run, o_avail, o_path
+        _os.environ.pop("ZAPRET_ENABLE_APPLY", None)
+        zapret.clear_strategy(lambda m: None)   # сброс состояния
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_migrate_domains, t_migrate_idempotent, t_migrate_deterministic,
@@ -1040,7 +1156,9 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_group_save_carry, t_group_sync_safety, t_group_rename_then_group_order,
           t_group_rename_match_original, t_group_nameless_bucket_kept, t_group_resolve_dedup,
           t_autoselect_emit, t_autoselect_nonconvertible, t_autoselect_resolve_save,
-          t_autoselect_edges):
+          t_autoselect_edges,
+          t_zapret_validate, t_zapret_baseline, t_zapret_autotest_best,
+          t_zapret_runstate, t_zapret_store, t_zapret_no_run_collision):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")

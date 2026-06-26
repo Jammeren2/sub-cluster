@@ -34,6 +34,7 @@ import graph
 import cluster as clustermod
 import secretbox
 import webui
+import zapret
 
 # ── окружение ──────────────────────────────────────────────────────────────
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
@@ -215,6 +216,35 @@ def domains_for_ui():
              "default": bool(d.get("default"))} for d in graph.domain_list(s)]
 
 
+def _normalize_zapret(data):
+    """Список zapret-стратегий из UI → (strategies, active_id, errors). Параметры каждой
+    стратегии валидируются белым списком флагов nfqws (защита от инъекции в subprocess)."""
+    raw = data.get("strategies") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        raw = []
+    out, errors, seen = [], [], set()
+    for item in raw[:50]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()[:80]
+        params = str(item.get("params") or "").strip()[:1000]
+        if not label and not params:
+            continue
+        ok, res = zapret.validate_params(params)
+        if not ok:
+            errors.append(f"«{label or 'стратегия'}»: {res}")
+            continue
+        sid = str(item.get("id") or "").strip()
+        if not re.match(r"^[A-Za-z0-9_-]{1,64}$", sid) or sid in seen:
+            sid = secrets.token_hex(6)
+        seen.add(sid)
+        out.append({"id": sid, "label": label or "стратегия", "params": params})
+    active = str((data or {}).get("active_id") or "").strip()
+    if active and active not in seen:
+        active = ""
+    return out, active, errors
+
+
 # ── базовый обработчик ─────────────────────────────────────────────────────
 class _Base(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -379,6 +409,13 @@ class AdminHandler(_Base):
             self._html(200, webui.render_settings(s, CLUSTER.all_nodes(),
                                                   crypto_ok=secretbox.crypto_ready(),
                                                   sub_port=SUB_PORT, admin_port=ADMIN_PORT))
+        elif path == "/zapret":
+            z = STORE.get_settings().get("zapret") or {}
+            self._html(200, webui.render_zapret(z, zapret.SERVICES, zapret.is_available(),
+                                                zapret.can_apply(), CLUSTER.id, sess["csrf"]))
+        elif path == "/zapret/test/status":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            self._json(200, zapret.test_status(qs.get("cursor", ["0"])[0]))
         else:
             self._respond(404, b"not found")
 
@@ -562,6 +599,51 @@ class AdminHandler(_Base):
         if path == "/settings/save":
             if self._save_settings(self._read_form()) is not False:
                 self._redirect("/settings")
+            return
+
+        # ── zapret (обход DPI): сохранение стратегий + авто-тест (JSON + CSRF) ──
+        if path in ("/zapret/save", "/zapret/test/start", "/zapret/test/stop"):
+            sess = self._session()
+            if not sess:
+                self._json(401, {"ok": False, "error": "Сессия истекла"})
+                return
+            if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), sess.get("csrf", "")):
+                self._json(403, {"ok": False, "error": "Неверный CSRF-токен"})
+                return
+            data = self._read_json() or {}
+            if path == "/zapret/save":
+                strategies, active_id, errs = _normalize_zapret(data)
+                if errs:
+                    self._json(400, {"ok": False, "error": "; ".join(errs)})
+                    return
+
+                def mut(cfg):
+                    z = cfg.setdefault("settings", {}).setdefault("zapret", {})
+                    z["strategies"] = strategies
+                    z["active_id"] = active_id
+                STORE.update_config(mut)
+                self._json(200, {"ok": True})
+            elif path == "/zapret/test/start":
+                z = STORE.get_settings().get("zapret") or {}
+                saved = {s["id"]: s for s in z.get("strategies", []) if s.get("id")}
+                ids = data.get("strategy_ids") if isinstance(data.get("strategy_ids"), list) else None
+                strategies = [saved[i] for i in (ids or list(saved.keys())) if i in saved]
+                if not strategies:  # хотя бы прямой режим (baseline)
+                    strategies = [{"id": "direct", "label": "Прямой (без обхода)", "params": ""}]
+                svc_in = data.get("service_keys") if isinstance(data.get("service_keys"), list) else None
+                svc_keys = [k for k in (svc_in or [s["key"] for s in zapret.SERVICES])
+                            if k in zapret.SERVICE_BY_KEY]
+
+                def on_done(results, best_id):
+                    if best_id and best_id in saved:   # авто-выбор лучшей (можно сменить)
+                        STORE.update_config(lambda cfg: cfg.setdefault("settings", {})
+                                            .setdefault("zapret", {}).__setitem__("active_id", best_id))
+                started = zapret.start_test(strategies, svc_keys, on_done=on_done)
+                self._json(200 if started else 409,
+                           {"ok": started, "error": "" if started else "тест уже идёт"})
+            else:  # /zapret/test/stop
+                zapret.stop_test()
+                self._json(200, {"ok": True})
             return
 
         self._respond(404, b"not found")

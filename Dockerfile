@@ -7,6 +7,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 WORKDIR /app
 COPY *.py editor.js editor.css ./
 
+# zapret (обход DPI, roadmap/04) — ОПЦИОНАЛЬНО, по умолчанию ВЫКЛЮЧЕНО (образ не пухнет,
+# поведение не меняется). Включить: docker build --build-arg INSTALL_ZAPRET=1 ...
+# Тогда нужны cap NET_ADMIN/NET_RAW (см. docker-compose) и ZAPRET_ENABLE_APPLY=1 в env,
+# чтобы авто-тест реально применял стратегии. Без этого /zapret даёт только baseline.
+ARG INSTALL_ZAPRET=0
+RUN if [ "$INSTALL_ZAPRET" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends git iptables libcap2-bin ca-certificates && \
+      git clone --depth 1 https://github.com/bol-van/zapret /opt/zapret && \
+      setcap cap_net_admin,cap_net_raw+ep /opt/zapret/binaries/linux-x86_64/nfqws && \
+      chmod -R a+rX /opt/zapret && rm -rf /var/lib/apt/lists/* ; \
+    fi
+# Путь к nfqws (если zapret не ставился — файла нет, is_available()=False, только baseline).
+ENV ZAPRET_NFQWS=/opt/zapret/binaries/linux-x86_64/nfqws
+
 # Три порта: ADMIN (панель), SUB (подписки), CLUSTER (peer-API кластера).
 # БД кластера — в /data (volume), переживает пересоздание контейнера.
 ENV LISTEN_HOST=0.0.0.0 \

@@ -22,6 +22,11 @@ services:
       PYTHONUNBUFFERED: "1"
     volumes:
       - cluster-data:/data
+    # zapret (обход DPI, roadmap/04) — раскомментируй ТОЛЬКО при образе с
+    # --build-arg INSTALL_ZAPRET=1 + ZAPRET_ENABLE_APPLY=1 в .env. Иначе не нужно.
+    # cap_add:
+    #   - NET_ADMIN
+    #   - NET_RAW
     # чтобы контейнер мог дёрнуть redeploy-agent на ХОСТЕ (http://host.docker.internal:9090)
     extra_hosts:
       - "host.docker.internal:host-gateway"
