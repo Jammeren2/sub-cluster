@@ -69,8 +69,24 @@ ZAPRET_FAKE_DIR = (os.environ.get("ZAPRET_FAKE_DIR") or "/opt/zapret/files/fake"
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "zapret")
 
 
+def _assets_posix():
+    """Каталог бандла в POSIX-форме (forward slashes) — пути идут в nfqws на Linux."""
+    return _ASSETS_DIR.replace(os.sep, "/")
+
+
+def _fix_asset_paths(params):
+    """Стратегии flowseal хардкодят /opt/zapret/{lists,bin}; направляем их на РЕАЛЬНО
+    лежащие в образе бандл-файлы (/app/assets/zapret/{lists,bin}). Так обход не зависит от
+    того, разложил ли Dockerfile/Coolify данные в /opt (а он мог и не разложить — отсюда
+    'cannot access hostlist file'). Файлы там точно есть: из них же грузятся стратегии."""
+    base = _assets_posix()
+    return (params.replace("/opt/zapret/lists/", base + "/lists/")
+                  .replace("/opt/zapret/bin/", base + "/bin/"))
+
+
 def _load_flowseal():
-    """Стратегии flowseal из assets/zapret/strategies/manifest.json → [{label, params}]."""
+    """Стратегии flowseal из assets/zapret/strategies/manifest.json → [{label, params}].
+    Пути к листам/фейкам направлены на бандл (см. _fix_asset_paths)."""
     out, mdir = [], os.path.join(_ASSETS_DIR, "strategies")
     try:
         with open(os.path.join(mdir, "manifest.json"), encoding="utf-8") as f:
@@ -84,14 +100,14 @@ def _load_flowseal():
         except Exception:
             continue
         if params:
-            out.append({"label": m.get("name") or m.get("id") or "", "params": params})
+            out.append({"label": m.get("name") or m.get("id") or "", "params": _fix_asset_paths(params)})
     return out
 
 
 def _default_strategies():
     """«+ набор по умолчанию»: baseline + рабочие flowseal-стратегии + простой фолбэк
     без листов. Flowseal — первыми (их и надо пробовать; «General ⭐» — топ)."""
-    q = ZAPRET_FAKE_DIR + "/quic_initial_www_google_com.bin"
+    q = _assets_posix() + "/bin/quic_initial_www_google_com.bin"   # бандл-фейк (точно есть)
     base = [{"label": "Прямой (baseline)", "params": ""}]
     fs = _load_flowseal()
     fallback = [
