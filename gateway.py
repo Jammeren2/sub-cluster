@@ -70,6 +70,9 @@ def unavailable_reason():
         return "xray не найден — задай ZAPRET=true в .env (узел сам доустановит на старте) и перезапусти"
     if not zapret.apply_enabled():
         return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
+    if not zapret.has_net_admin():
+        return ("контейнеру НЕ выдан NET_ADMIN — gateway не поднимет NFQUEUE. Добавь "
+                "cap_add: [NET_ADMIN, NET_RAW] и сделай redeploy (не restart)")
     return ""
 
 

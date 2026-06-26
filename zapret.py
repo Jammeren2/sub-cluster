@@ -228,6 +228,22 @@ def can_apply():
     return is_available() and apply_enabled()
 
 
+def has_net_admin():
+    """Есть ли у контейнера CAP_NET_ADMIN (нужен для iptables/NFQUEUE). False → права не
+    выданы при создании контейнера (рантаймом не добавить): нужен cap_add NET_ADMIN/NET_RAW.
+    Даже root в обычном docker-контейнере НЕ имеет NET_ADMIN по умолчанию."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("CapEff:"):
+                    return bool(int(line.split()[1], 16) & (1 << 12))   # CAP_NET_ADMIN = 12
+    except Exception:
+        pass
+    return False
+
+
 def unavailable_reason():
     """Почему обход не применяется (точная причина для UI). '' = всё ок, можно применять."""
     if not sys.platform.startswith("linux"):
@@ -240,6 +256,12 @@ def unavailable_reason():
                 "на старте) и перезапусти контейнер")
     if not apply_enabled():
         return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
+    if not has_net_admin():
+        return ("контейнеру НЕ выдан NET_ADMIN — обход/NFQUEUE не заработают. Добавь "
+                "cap_add: [NET_ADMIN, NET_RAW] в docker-compose (или в Coolify) и сделай "
+                "redeploy (не restart — права назначаются при пересоздании контейнера)")
+    if shutil.which("iptables") is None:
+        return "iptables нет в контейнере — доустанавливается в фоне; обнови через ~1 мин"
     return ""
 
 

@@ -629,6 +629,9 @@ def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", d
         banner = ('<div class="flash">zapret найден, но применение обхода выключено — задай '
                   '<span class="mono">ZAPRET=true</span> в .env, чтобы авто-тест реально применял стратегии.'
                   + why + ' Сейчас — только baseline (доступность без обхода).</div>')
+    elif reason:
+        banner = ('<div class="flash err">zapret включён, но <b>обход НЕ применится</b>:' + why
+                  + '</div>')
     else:
         banner = ('<div class="flash">zapret активен: авто-тест применяет стратегии к egress контейнера и меряет '
                   'доступность.</div>')
