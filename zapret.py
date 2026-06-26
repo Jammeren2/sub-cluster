@@ -4,7 +4,7 @@ zapret.py — каркас ноды zapret (обход DPI) + авто-тест 
 
 ОБЪЁМ (важно): это ДИАГНОСТИКА/выбор стратегии НА УЗЛЕ, а не конечный обход DPI для
 твоего трафика. Реальное применение стратегии к трафику телефона требует прокси-шлюза
-и роутер-ноды (#05) — отложено. Здесь:
+и роутер-ноды — отложено (отдельная фаза). Здесь:
   • check_baseline() — чистый Python TLS-пробник: какие из заблокированных сервисов
     доступны с этого узла ПРЯМО СЕЙЧАС (без привилегий, тестируется везде);
   • run_autotest() — для каждой стратегии (при наличии zapret) применяет обход и
@@ -56,6 +56,29 @@ SERVICES = [
 SERVICE_BY_KEY = {s["key"]: s for s in SERVICES}
 
 PROBE_TIMEOUT = float(os.environ.get("ZAPRET_PROBE_TIMEOUT", "4"))
+
+# Каталог fake-payload'ов в установленном zapret (bol-van/zapret). Переопределяется env.
+ZAPRET_FAKE_DIR = (os.environ.get("ZAPRET_FAKE_DIR") or "/opt/zapret/files/fake").rstrip("/")
+
+# Набор стратегий «по умолчанию» (кнопка «+ набор по умолчанию» в UI). Канонические
+# nfqws-стратегии из zapret (bol-van): самодостаточные (без --hostlist, применяются ко
+# всему трафику на queued-портах). QUIC-фейки ссылаются на shipped-файлы под ZAPRET_FAKE_DIR.
+def _default_strategies():
+    q = ZAPRET_FAKE_DIR + "/quic_initial_www_google_com.bin"
+    return [
+        {"label": "Прямой (baseline)", "params": ""},
+        {"label": "TCP fake+split2 ttl=1", "params": "--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-ttl=1"},
+        {"label": "TCP fake+split2 md5sig", "params": "--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-fooling=md5sig"},
+        {"label": "TCP fake+disorder2 badseq", "params": "--filter-tcp=80,443 --dpi-desync=fake,disorder2 --dpi-desync-fooling=badseq"},
+        {"label": "TCP fakedsplit pos=1", "params": "--filter-tcp=80,443 --dpi-desync=fakedsplit --dpi-desync-split-pos=1 --dpi-desync-ttl=1"},
+        {"label": "TCP multisplit", "params": "--filter-tcp=80,443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld"},
+        {"label": "TCP syndata", "params": "--filter-tcp=80,443 --dpi-desync=syndata"},
+        {"label": "QUIC/UDP 443 fake", "params": f"--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6 --dpi-desync-fake-quic={q}"},
+        {"label": "Комбо TCP+QUIC", "params": f"--filter-tcp=80,443 --dpi-desync=fake,split2 --dpi-desync-ttl=1 --new --filter-udp=443 --dpi-desync=fake --dpi-desync-fake-quic={q}"},
+    ]
+
+
+DEFAULT_STRATEGIES = _default_strategies()
 
 # Валидация стратегии nfqws. Аргументы уходят в subprocess СПИСКОМ (без shell),
 # поэтому инъекция шелл-команд невозможна в принципе; задача валидации — отсечь
@@ -123,7 +146,11 @@ def nfqws_path():
     w = shutil.which("nfqws")
     if w:
         return w
-    for cand in ("/opt/zapret/binaries/linux-x86_64/nfqws", "/opt/zapret/nfqws"):
+    for cand in ("/opt/zapret/binaries/linux-x86_64/nfqws",
+                 "/opt/zapret/binaries/linux-aarch64/nfqws",
+                 "/opt/zapret/binaries/linux-arm/nfqws",
+                 "/opt/zapret/nfqws", "/opt/zapret/bin/nfqws",
+                 "/usr/local/bin/nfqws", "/usr/bin/nfqws"):
         if os.path.exists(cand):
             return cand
     return None
@@ -138,6 +165,19 @@ def can_apply():
     """Реально применять обход к egress — только при явном согласии (защита от
     случайной правки сети непротестированным кодом). Иначе авто-тест = только baseline."""
     return is_available() and os.environ.get("ZAPRET_ENABLE_APPLY") == "1"
+
+
+def unavailable_reason():
+    """Почему обход не применяется (точная причина для UI). '' = всё ок, можно применять."""
+    if not sys.platform.startswith("linux"):
+        return "узел не на Linux (nfqws работает только на Linux)"
+    if nfqws_path() is None:
+        return ("бинарник nfqws не найден — пересобери образ с "
+                "--build-arg INSTALL_ZAPRET=1 (или задай ZAPRET_NFQWS=путь)")
+    if os.environ.get("ZAPRET_ENABLE_APPLY") != "1":
+        return ("применение выключено — задай ZAPRET_ENABLE_APPLY=1 и дай контейнеру "
+                "cap NET_ADMIN/NET_RAW (см. docker-compose)")
+    return ""
 
 
 # ── baseline-пробник доступности (чистый Python, без привилегий, тестируемо) ──
@@ -213,9 +253,7 @@ def apply_strategy(params, log_cb=None):
         return True
     if not can_apply():
         if log_cb:
-            reason = "zapret недоступен (нет nfqws/не Linux)" if not is_available() \
-                else "применение выключено (ZAPRET_ENABLE_APPLY!=1)"
-            log_cb(f"  обход НЕ применён: {reason} — меряю как есть (baseline)")
+            log_cb(f"  обход НЕ применён: {unavailable_reason()} — меряю как есть (baseline)")
         return False
     global _nfqws_proc, _applied_rules
     with _apply_lock:
@@ -279,7 +317,7 @@ def run_autotest(strategies, service_keys, log_cb=None, stop_evt=None):
     if not service_keys:
         service_keys = [s["key"] for s in SERVICES]
     if not can_apply():
-        _log("⚠ zapret не применяется (диагностика без обхода) — реальный обход появится с роутер-нодой (#05).")
+        _log(f"⚠ zapret не применяется (диагностика без обхода): {unavailable_reason()}")
 
     results = {}
     for st in strategies:
@@ -364,6 +402,7 @@ def test_status(cursor=0):
             "state": _run["state"],
             "available": is_available(),
             "can_apply": can_apply(),
+            "reason": unavailable_reason(),
             "logs": _run["logs"][cursor:],
             "cursor": total,
             "results": _run["results"],

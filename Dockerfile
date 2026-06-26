@@ -12,14 +12,21 @@ COPY *.py editor.js editor.css ./
 # Тогда нужны cap NET_ADMIN/NET_RAW (см. docker-compose) и ZAPRET_ENABLE_APPLY=1 в env,
 # чтобы авто-тест реально применял стратегии. Без этого /zapret даёт только baseline.
 ARG INSTALL_ZAPRET=0
+# Версия zapret. ВАЖНО: prebuilt-бинарники (nfqws) лежат только в release-тарболе, в git
+# их НЕТ — поэтому ставим из релиза, а не `git clone`. Бинарники статические (musl).
+ARG ZAPRET_VERSION=v72.12
 RUN if [ "$INSTALL_ZAPRET" = "1" ]; then \
-      apt-get update && apt-get install -y --no-install-recommends git iptables libcap2-bin ca-certificates && \
-      git clone --depth 1 https://github.com/bol-van/zapret /opt/zapret && \
+      apt-get update && apt-get install -y --no-install-recommends iptables libcap2-bin ca-certificates && \
+      rm -rf /var/lib/apt/lists/* && \
+      mkdir -p /opt/zapret && \
+      python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/bol-van/zapret/releases/download/${ZAPRET_VERSION}/zapret-${ZAPRET_VERSION}.tar.gz', '/tmp/zapret.tgz')" && \
+      tar -xzf /tmp/zapret.tgz -C /opt/zapret --strip-components=1 && rm /tmp/zapret.tgz && \
       setcap cap_net_admin,cap_net_raw+ep /opt/zapret/binaries/linux-x86_64/nfqws && \
-      chmod -R a+rX /opt/zapret && rm -rf /var/lib/apt/lists/* ; \
+      chmod -R a+rX /opt/zapret ; \
     fi
-# Путь к nfqws (если zapret не ставился — файла нет, is_available()=False, только baseline).
-ENV ZAPRET_NFQWS=/opt/zapret/binaries/linux-x86_64/nfqws
+# Пути к nfqws и fake-payload'ам (если zapret не ставился — файлов нет, is_available()=False).
+ENV ZAPRET_NFQWS=/opt/zapret/binaries/linux-x86_64/nfqws \
+    ZAPRET_FAKE_DIR=/opt/zapret/files/fake
 
 # Три порта: ADMIN (панель), SUB (подписки), CLUSTER (peer-API кластера).
 # БД кластера — в /data (volume), переживает пересоздание контейнера.

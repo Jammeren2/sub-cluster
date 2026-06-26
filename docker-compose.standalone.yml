@@ -8,7 +8,11 @@
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        # zapret в образ: поставь INSTALL_ZAPRET=1 в .env → в образе будет nfqws.
+        INSTALL_ZAPRET: "${INSTALL_ZAPRET:-0}"
     image: sub-cluster
     container_name: sub-cluster-app
     restart: unless-stopped
@@ -20,10 +24,12 @@ services:
       CLUSTER_PORT: "8083"
       DB_FILE: "/data/cluster.db"
       PYTHONUNBUFFERED: "1"
+      # Применять обход к egress (нужно INSTALL_ZAPRET=1 + cap_add ниже). 0 = только baseline.
+      ZAPRET_ENABLE_APPLY: "${ZAPRET_ENABLE_APPLY:-0}"
     volumes:
       - cluster-data:/data
-    # zapret (обход DPI) — раскомментируй ТОЛЬКО при образе с
-    # --build-arg INSTALL_ZAPRET=1 + ZAPRET_ENABLE_APPLY=1 в .env. Иначе не нужно.
+    # zapret (обход DPI) — раскомментируй, ЕСЛИ собрал образ с INSTALL_ZAPRET=1 и хочешь,
+    # чтобы авто-тест реально применял стратегии (плюс ZAPRET_ENABLE_APPLY=1 в .env).
     # cap_add:
     #   - NET_ADMIN
     #   - NET_RAW

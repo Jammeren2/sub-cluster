@@ -412,7 +412,8 @@ class AdminHandler(_Base):
         elif path == "/zapret":
             z = STORE.get_settings().get("zapret") or {}
             self._html(200, webui.render_zapret(z, zapret.SERVICES, zapret.is_available(),
-                                                zapret.can_apply(), CLUSTER.id, sess["csrf"]))
+                                                zapret.can_apply(), CLUSTER.id, sess["csrf"],
+                                                zapret.unavailable_reason(), zapret.DEFAULT_STRATEGIES))
         elif path == "/zapret/test/status":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             self._json(200, zapret.test_status(qs.get("cursor", ["0"])[0]))

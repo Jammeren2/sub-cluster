@@ -1146,6 +1146,25 @@ def t_zapret_store():
     check("active_id коэрцится в строку", z2["active_id"] == "123", z2)
 
 
+def t_zapret_defaults():
+    print("\n[48b] zapret.DEFAULT_STRATEGIES: набор по умолчанию валиден")
+    ds = zapret.DEFAULT_STRATEGIES
+    check("набор непустой", isinstance(ds, list) and len(ds) >= 5, len(ds) if isinstance(ds, list) else ds)
+    check("есть baseline (пустые params)", any((d.get("params") or "") == "" for d in ds))
+    for d in ds:
+        ok, res = zapret.validate_params(d.get("params") or "")
+        check(f"валидна: {d.get('label')}", ok, res if not ok else "")
+    # QUIC-стратегия ссылается на shipped fake-payload
+    check("есть QUIC/UDP-стратегия с fake-quic",
+          any("--filter-udp=443" in (d.get("params") or "") and "fake-quic" in (d.get("params") or "") for d in ds))
+    # порты комбо-стратегии корректно собираются
+    combo = next((d for d in ds if "--new" in (d.get("params") or "")), None)
+    if combo:
+        _, toks = zapret.validate_params(combo["params"])
+        p = zapret._collect_filter_ports(toks)
+        check("комбо: tcp+udp порты собраны", "443" in p["tcp"] and "443" in p["udp"], p)
+
+
 def t_zapret_no_run_collision():
     print("\n[49] zapret: привилегированный путь доходит до subprocess (нет коллизии _run)")
     import os as _os
@@ -1401,7 +1420,7 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_autoselect_emit, t_autoselect_nonconvertible, t_autoselect_resolve_save,
           t_autoselect_edges,
           t_zapret_validate, t_zapret_baseline, t_zapret_autotest_best,
-          t_zapret_runstate, t_zapret_store, t_zapret_no_run_collision,
+          t_zapret_runstate, t_zapret_store, t_zapret_defaults, t_zapret_no_run_collision,
           t_router_config_shape, t_router_custom_domain_ip, t_router_default_target,
           t_router_missing_and_unknown, t_router_group_and_auto_targets, t_router_resolve_save,
           t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety):

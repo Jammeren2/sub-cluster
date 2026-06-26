@@ -611,25 +611,27 @@ def render_stats(stats, routes, node_id, sub_base):
 
 
 # ── zapret (обход DPI): стратегии + авто-тест ───────────────────────────────
-def render_zapret(z, services, available, can_apply, node_id, csrf):
+def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", defaults=None):
     z_ui = {
         "strategies": [{"id": s.get("id", ""), "label": s.get("label", ""), "params": s.get("params", "")}
                        for s in (z.get("strategies") or [])],
         "active_id": z.get("active_id") or "",
         "services": [{"key": s["key"], "label": s["label"]} for s in services],
         "available": bool(available), "can_apply": bool(can_apply), "node": node_id,
+        "defaults": [{"label": d.get("label", ""), "params": d.get("params", "")} for d in (defaults or [])],
     }
+    why = f' <b>Причина:</b> {esc(reason)}' if reason else ''
     if not available:
-        banner = ('<div class="flash err">zapret недоступен на этом узле (нет бинарника nfqws или не Linux). '
-                  'Авто-тест покажет ТОЛЬКО базовую доступность сервисов <b>без обхода</b>. Поставь zapret в образ '
-                  '(Dockerfile) + cap NET_ADMIN/NET_RAW, чтобы тестировать стратегии.</div>')
+        banner = ('<div class="flash err">zapret недоступен на этом узле — авто-тест покажет ТОЛЬКО базовую '
+                  'доступность сервисов <b>без обхода</b>.' + why + ' Чтобы тестировать стратегии: пересобери '
+                  'образ с <span class="mono">--build-arg INSTALL_ZAPRET=1</span> + cap NET_ADMIN/NET_RAW.</div>')
     elif not can_apply:
         banner = ('<div class="flash">zapret найден, но применение обхода выключено — задай '
-                  '<span class="mono">ZAPRET_ENABLE_APPLY=1</span> на узле, чтобы авто-тест реально применял стратегии. '
-                  'Сейчас — только baseline (доступность без обхода).</div>')
+                  '<span class="mono">ZAPRET_ENABLE_APPLY=1</span> на узле, чтобы авто-тест реально применял стратегии.'
+                  + why + ' Сейчас — только baseline (доступность без обхода).</div>')
     else:
         banner = ('<div class="flash">zapret активен: авто-тест применяет стратегии к egress контейнера и меряет '
-                  'доступность. Реальный обход для трафика клиентов появится с роутер-нодой (#05).</div>')
+                  'доступность.</div>')
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>zapret — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
@@ -638,7 +640,7 @@ def render_zapret(z, services, available, can_apply, node_id, csrf):
 <div style="margin:8px 0 16px">{nav_links("/zapret")}</div>
 <div class="muted" style="margin-bottom:12px">Узел: <b>{esc(node_id)}</b>. Это <b>выбор стратегии и проверка
 доступности НА УЗЛЕ</b> — авто-тест меряет, какие из заблокированных сервисов доступны (с обходом и без).
-Конечное применение обхода к трафику твоего телефона появится с роутер-нодой (#05) + прокси-шлюзом.</div>
+Конечное применение обхода к трафику клиента появится с узлом-прокси-шлюзом (отдельная фаза).</div>
 {banner}
 <div class="card"><div class="route-title">Стратегии</div>
   <div class="help" style="margin:4px 0 10px">Параметры — флаги <span class="mono">nfqws</span>, можно
@@ -651,6 +653,7 @@ def render_zapret(z, services, available, can_apply, node_id, csrf):
   <div id="zlist"></div>
   <button class="btn small" type="button" id="zadd">+ стратегия</button>
   <button class="btn small gray" type="button" id="zdirect">+ direct</button>
+  <button class="btn small gray" type="button" id="zdefaults">+ набор по умолчанию</button>
   <button class="btn small primary" type="button" id="zsave">Сохранить стратегии</button>
 </div>
 <div class="card"><div class="route-title">Сервисы для теста</div>
@@ -699,10 +702,18 @@ ZAPRET_JS = r"""
       var pi=el('textarea'); pi.className='mono'; pi.rows=4; pi.value=s.params||''; pi.placeholder='Вставь конфиг zapret целиком (секции через --new), напр.:\n--filter-udp=443 --dpi-desync=fake --dpi-desync-fake-quic=/opt/zapret/bin/quic.bin --new\n--filter-tcp=80,443 --dpi-desync=hostfakesplit --dpi-desync-fooling=ts'; pi.addEventListener('input',function(){ s.params=pi.value; }); c.appendChild(pi);
       list.appendChild(c);
     });
-    if(!Z.strategies.length) list.appendChild(el('div','help','Стратегий нет. Добавь «+ direct» для baseline-проверки доступности.'));
+    if(!Z.strategies.length) list.appendChild(el('div','help','Стратегий нет. Жми «+ набор по умолчанию» или «+ direct».'));
   }
   document.getElementById('zadd').addEventListener('click',function(){ Z.strategies.push({id:genId(),label:'',params:''}); render(); });
   document.getElementById('zdirect').addEventListener('click',function(){ Z.strategies.push({id:genId(),label:'Прямой (без обхода)',params:''}); render(); });
+  document.getElementById('zdefaults').addEventListener('click',function(){
+    var have={}; Z.strategies.forEach(function(s){ have[(s.params||'').trim()]=1; });
+    var added=0;
+    (Z.defaults||[]).forEach(function(d){ var p=(d.params||'').trim(); if(have[p])return; have[p]=1;
+      Z.strategies.push({id:genId(),label:d.label||'',params:d.params||''}); added++; });
+    if(!added && !(Z.defaults||[]).length) alert('Набор по умолчанию пуст.');
+    render();
+  });
 
   Z.services.forEach(function(sv){
     var lab=el('label','zchk'); var cb=el('input'); cb.type='checkbox'; cb.checked=true; cb.dataset.k=sv.key; cb.style.width='auto';
