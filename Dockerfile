@@ -57,11 +57,12 @@ ENV LISTEN_HOST=0.0.0.0 \
 
 EXPOSE 8080 8081 8083
 
-# Не работаем под root. /data — для персистентной БД кластера.
-RUN useradd --create-home --uid 10001 app \
-    && mkdir -p /data && chown app:app /data
+# Работаем от ROOT — узлу нужны NET_ADMIN/NET_RAW (nfqws/iptables/NFQUEUE, xray SO_MARK).
+# non-root процесс НЕ получает эти права даже при cap_add (capability не попадает в его
+# effective-set, и apt/setcap в рантайме недоступны). Контейнер изолирован и за прокси
+# (Caddy/Coolify), доступ в панель под паролем. /data — персистентная БД кластера.
+RUN mkdir -p /data
 VOLUME ["/data"]
-USER app
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=5s \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz',timeout=3).read()==b'ok' else 1)"
