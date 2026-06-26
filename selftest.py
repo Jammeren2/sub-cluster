@@ -1143,7 +1143,222 @@ def t_zapret_no_run_collision():
         zapret.clear_strategy(lambda m: None)   # сброс состояния
 
 
+# ── нода-роутер (#05): geosite/geoip-правила → таргеты ─────────────────────
+def t_router_config_shape():
+    print("\n[50] _wrap_as_router: форма конфига")
+    targets = {
+        "t_link": {"kind": "link", "link": "vless://u@h1:443?type=tcp#L"},
+        "t_grp": {"kind": "group", "name": "DE", "params": {}, "auto": True, "buckets": [],
+                  "subs": [{"url": "https://de/sub", "renames": []}], "keys": []},
+    }
+    rules = [{"match": {"kind": "preset", "value": "telegram"}, "target": "t_link"},
+             {"match": {"kind": "preset", "value": "youtube"}, "target": "t_grp"}]
+    c = subs._wrap_as_router(targets, rules, "direct", "Роутер", {"strategy": "leastPing"})
+    check("remarks", c.get("remarks") == "Роутер")
+    rr = c["routing"]["rules"]
+    check("правил = 2 + default", len(rr) == 3, len(rr))
+    check("telegram → geosite+geoip", rr[0].get("domain") == ["geosite:telegram"] and rr[0].get("ip") == ["geoip:telegram"], rr[0])
+    check("link-таргет → outboundTag proxy-", str(rr[0].get("outboundTag", "")).startswith("proxy-"), rr[0])
+    check("youtube → group-таргет balancerTag", str(rr[1].get("balancerTag", "")).startswith("balancer-"), rr[1])
+    check("default: network tcp,udp + direct", rr[2].get("network") == "tcp,udp" and rr[2].get("outboundTag") == "direct", rr[2])
+    check("один balancer (группа из 2 членов)", len(c["routing"].get("balancers", [])) == 1)
+    check("balancer selector proxy-1-", c["routing"]["balancers"][0]["selector"] == ["proxy-1-"], c["routing"]["balancers"])
+    check("burstObservatory subjectSelector proxy-", c["burstObservatory"]["subjectSelector"] == ["proxy-"])
+    tags = [o.get("tag") for o in c["outbounds"]]
+    check("direct/block в outbounds", "direct" in tags and "block" in tags)
+
+
+def t_router_custom_domain_ip():
+    print("\n[51] роутер: кастомный domain/ip matcher")
+    targets = {"t1": {"kind": "link", "link": "vless://u@h1:443?type=tcp#L"}}
+    rules = [{"match": {"kind": "domain", "value": "example.com"}, "target": "t1"},
+             {"match": {"kind": "ip", "value": "8.8.8.8/32"}, "target": "t1"}]
+    c = subs._wrap_as_router(targets, rules, "direct", "R", {})
+    rr = c["routing"]["rules"]
+    check("domain-правило", rr[0].get("domain") == ["example.com"], rr[0])
+    check("ip-правило", rr[1].get("ip") == ["8.8.8.8/32"], rr[1])
+
+
+def t_router_default_target():
+    print("\n[52] роутер: default-таргет (не direct)")
+    targets = {"t1": {"kind": "link", "link": "vless://u@h1:443?type=tcp#L"}}
+    c = subs._wrap_as_router(targets, [], "t1", "R", {})
+    rr = c["routing"]["rules"]
+    check("только default rule", len(rr) == 1, len(rr))
+    check("default → outboundTag proxy- (не direct)", str(rr[0].get("outboundTag", "")).startswith("proxy-"), rr[0])
+
+
+def t_router_missing_and_unknown():
+    print("\n[53] роутер: пропавший таргет → direct; неизвестный пресет выкинут")
+    targets = {"t1": {"kind": "link", "link": "vless://u@h1:443?type=tcp#L"}}
+    rules = [{"match": {"kind": "preset", "value": "telegram"}, "target": "gone"},
+             {"match": {"kind": "preset", "value": "nope"}, "target": "t1"}]
+    c = subs._wrap_as_router(targets, rules, "direct", "R", {})
+    rr = c["routing"]["rules"]
+    check("неизвестный пресет выкинут (telegram + default)", len(rr) == 2, len(rr))
+    check("пропавший таргет → direct", rr[0].get("outboundTag") == "direct", rr[0])
+
+
+def t_router_group_and_auto_targets():
+    print("\n[54] роутер: таргеты группа + авто; неконвертируемый член пропущен")
+    targets = {
+        "tg": {"kind": "group", "name": "DE", "params": {}, "auto": True, "buckets": [],
+               "subs": [{"url": "https://de/sub", "renames": []}], "keys": []},
+        "ta": {"kind": "auto", "name": "MIX", "params": {}, "auto": True, "buckets": [],
+               "subs": [{"url": "https://mix/sub", "renames": []}], "keys": []},
+    }
+    rules = [{"match": {"kind": "preset", "value": "youtube"}, "target": "tg"},
+             {"match": {"kind": "preset", "value": "discord"}, "target": "ta"}]
+    c = subs._wrap_as_router(targets, rules, "direct", "R", {})
+    check("два балансера (группа + авто)", len(c["routing"].get("balancers", [])) == 2, c["routing"].get("balancers"))
+    check("hysteria2 не в выдаче", "hysteria2" not in json.dumps(c))
+
+
+def t_router_resolve_save():
+    print("\n[55] роутер: resolve + save_graph carry + classic не стирает")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "s1bbbbbb", "type": "source", "url": "https://de/sub"},
+            {"id": "g1gggggg", "type": "group", "url": "", "label": "DE"},
+            {"id": "k1kkkkkk", "type": "key", "url": ""},
+            {"id": "rt000000", "type": "router", "url": "", "label": "Роутер"}],
+        "routes": [{"id": "r1cccccc", "path": "/rt", "mode": "merge", "enabled": True}],
+        "edges": [
+            {"from": "s1bbbbbb", "to": "g1gggggg"},
+            {"from": "g1gggggg", "to": "rt000000"},
+            {"from": "k1kkkkkk", "to": "rt000000"},
+            {"from": "rt000000", "to": "r1cccccc"}],
+        "node_meta": {
+            "g1gggggg": {"group": {"buckets": [{"name": "DE", "members": [{"addr": "de1:443", "name": "DE-1"}]}], "params": {}}},
+            "k1kkkkkk": {"keys": [{"link": "vless://kk@hk:443?type=tcp#K", "name": "K"}]},
+            "rt000000": {"router": {"rules": [{"match": {"kind": "preset", "value": "youtube"}, "target": "g1gggggg"},
+                                              {"match": {"kind": "preset", "value": "telegram"}, "target": "k1kkkkkk"}],
+                                    "default_target": "direct", "params": {}}}},
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    cfg = st.get_config()
+    check("роутер сохранён type=router", any(s["id"] == "rt000000" and s.get("type") == "router" for s in cfg["sources"]))
+    check("node_meta.router.rules целы", len(cfg["node_meta"]["rt000000"]["router"]["rules"]) == 2)
+    check("ребро group→router цело", any(e["from"] == "g1gggggg" and e["to"] == "rt000000" for e in cfg["edges"]))
+    spec = graph.resolve_links_spec(st, get_route(st, "r1cccccc"))
+    check("spec.routers len 1", len(spec.get("routers", [])) == 1, spec.get("routers"))
+    R = spec["routers"][0]
+    check("таргеты = group + key", set(R["targets"].keys()) == {"g1gggggg", "k1kkkkkk"}, list(R["targets"].keys()))
+    check("group-таргет kind=group", R["targets"]["g1gggggg"]["kind"] == "group")
+    check("key-таргет kind=link", R["targets"]["k1kkkkkk"]["kind"] == "link")
+    payload, h = subs.build_route_response(get_route(st, "r1cccccc"), spec)
+    check("отдача JSON c роутером", "application/json" in h.get("Content-Type", "")
+          and any(c.get("remarks") == "Роутер" for c in json.loads(payload.decode())))
+    graph.add_route(st, "/x", "X", ["https://text/sub"], "merge")
+    sids = {s["id"] for s in st.get_config()["sources"]}
+    check("роутер и входы живы после add_route", {"rt000000", "g1gggggg", "k1kkkkkk", "s1bbbbbb"} <= sids)
+
+
+def t_router_target_remap():
+    print("\n[56] роутер: target id-remap при пересоздании id (P0)")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "bad id!", "type": "key", "url": ""},
+            {"id": "rt000000", "type": "router", "url": "", "label": "R"}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "bad id!", "to": "rt000000"}, {"from": "rt000000", "to": "r1cccccc"}],
+        "node_meta": {
+            "bad id!": {"keys": [{"link": "vless://x@h:443#K", "name": "K"}]},
+            "rt000000": {"router": {"rules": [{"match": {"kind": "preset", "value": "telegram"}, "target": "bad id!"}],
+                                    "default_target": "bad id!", "params": {}}}},
+    }
+    graph.save_graph(st, data)
+    cfg = st.get_config()
+    newid = next(s["id"] for s in cfg["sources"] if s["id"] != "rt000000")
+    check("id ключа переназначен", newid != "bad id!")
+    rt = cfg["node_meta"]["rt000000"]["router"]
+    check("target правила перенесён на новый id", rt["rules"][0]["target"] == newid, rt["rules"])
+    check("default_target перенесён на новый id", rt["default_target"] == newid)
+
+
+def t_router_gc_unknown_target():
+    print("\n[57] роутер: неизвестный target → direct (GC)")
+    st = new_store()
+    data = {
+        "sources": [{"id": "rt000000", "type": "router", "url": "", "label": "R"}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "rt000000", "to": "r1cccccc"}],
+        "node_meta": {"rt000000": {"router": {"rules": [{"match": {"kind": "preset", "value": "telegram"}, "target": "ghost"}],
+                                              "default_target": "alsoghost", "params": {}}}},
+    }
+    graph.save_graph(st, data)
+    rt = st.get_config()["node_meta"]["rt000000"]["router"]
+    check("неизвестный target правила → direct", rt["rules"][0]["target"] == "direct", rt["rules"])
+    check("неизвестный default → direct", rt["default_target"] == "direct")
+
+
+def t_router_edges():
+    print("\n[58] роутер: правила рёбер")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "g1gggggg", "type": "group", "url": "", "label": "G"},
+            {"id": "a1aaaaaa", "type": "autoselect", "url": "", "label": "A"},
+            {"id": "rt000000", "type": "router", "url": "", "label": "R1"},
+            {"id": "rt111111", "type": "router", "url": "", "label": "R2"},
+            {"id": "k1kkkkkk", "type": "key", "url": ""}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True}],
+        "edges": [
+            {"from": "g1gggggg", "to": "rt000000"},
+            {"from": "k1kkkkkk", "to": "rt000000"},
+            {"from": "rt111111", "to": "rt000000"},
+            {"from": "r1cccccc", "to": "rt000000"},
+            {"from": "rt000000", "to": "g1gggggg"},
+            {"from": "g1gggggg", "to": "a1aaaaaa"},
+            {"from": "rt000000", "to": "r1cccccc"}],
+        "node_meta": {
+            "g1gggggg": {"group": {"buckets": [{"name": "G", "members": [{"link": "vless://x@h:443#K"}]}]}},
+            "a1aaaaaa": {"autoselect": {"params": {}}},
+            "rt000000": {"router": {"rules": [], "default_target": "direct", "params": {}}},
+            "rt111111": {"router": {"rules": [], "default_target": "direct", "params": {}}},
+            "k1kkkkkk": {"keys": [{"link": "vless://kk@hk:443#K"}]}},
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    E = st.get_config()["edges"]
+
+    def has(a, b):
+        return any(e["from"] == a and e["to"] == b for e in E)
+    check("group→router сохранено", has("g1gggggg", "rt000000"))
+    check("key→router сохранено", has("k1kkkkkk", "rt000000"))
+    check("router→router отброшено", not has("rt111111", "rt000000"))
+    check("route→router отброшено", not has("r1cccccc", "rt000000"))
+    check("router→group отброшено", not has("rt000000", "g1gggggg"))
+    check("group→auto отброшено (регрессия)", not has("g1gggggg", "a1aaaaaa"))
+    check("router→route сохранено", has("rt000000", "r1cccccc"))
+
+
+def t_router_sync_safety():
+    print("\n[59] роутер: переживает запись старого узла")
+    st = new_store()
+    graph.save_graph(st, {
+        "sources": [
+            {"id": "s1bbbbbb", "type": "source", "url": "https://de/sub"},
+            {"id": "rt000000", "type": "router", "url": "", "label": "R"}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True}],
+        "edges": [{"from": "s1bbbbbb", "to": "rt000000"}, {"from": "rt000000", "to": "r1cccccc"}],
+        "node_meta": {"rt000000": {"router": {"rules": [{"match": {"kind": "preset", "value": "youtube"}, "target": "s1bbbbbb"}],
+                                              "default_target": "direct", "params": {}}}},
+    })
+    st.update_config(lambda cfg: (cfg.__setitem__("sources", [dict(s) for s in cfg["sources"]]),
+                                  cfg.__setitem__("edges", [dict(e) for e in cfg["edges"]])))
+    cfg = st.get_config()
+    check("роутер в sources цел", any(s["id"] == "rt000000" for s in cfg["sources"]))
+    check("source питающий ТОЛЬКО роутер цел", any(s["id"] == "s1bbbbbb" for s in cfg["sources"]))
+    check("node_meta.router пережил запись старого узла",
+          bool(cfg.get("node_meta", {}).get("rt000000", {}).get("router")))
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
+          t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_migrate_domains, t_migrate_idempotent, t_migrate_deterministic,
           t_domain_id_carried, t_domain_unknown_blanks, t_perdomain_path_uniqueness,
@@ -1158,7 +1373,10 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_autoselect_emit, t_autoselect_nonconvertible, t_autoselect_resolve_save,
           t_autoselect_edges,
           t_zapret_validate, t_zapret_baseline, t_zapret_autotest_best,
-          t_zapret_runstate, t_zapret_store, t_zapret_no_run_collision):
+          t_zapret_runstate, t_zapret_store, t_zapret_no_run_collision,
+          t_router_config_shape, t_router_custom_domain_ip, t_router_default_target,
+          t_router_missing_and_unknown, t_router_group_and_auto_targets, t_router_resolve_save,
+          t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")

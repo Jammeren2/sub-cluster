@@ -243,6 +243,7 @@ def render_editor(graph, sub_base, csrf, banner="", domains=None):
   <button class="btn" id="addKey">+ Ключ</button>
   <button class="btn" id="addGroup">+ Группа</button>
   <button class="btn" id="addAuto">+ Авто-выбор</button>
+  <button class="btn" id="addRouter">+ Роутер</button>
   <button class="btn" id="addRoute">+ Маршрут</button>
   <button class="btn gray" id="reset">Сбросить вид</button>
   <button class="btn gray" id="blurToggle">Показать ссылки</button>
@@ -259,7 +260,7 @@ def render_editor(graph, sub_base, csrf, banner="", domains=None):
     <span style="opacity:.7">Колесо — зум, перетаскивание фона — панорама.</span></div>
 </div>
 <div id="toast"></div>
-<script>window.__GRAPH__={js_embed(graph)};window.__ADMIN__="";window.__CSRF__={js_embed(csrf)};window.__BASE__={js_embed(sub_base)};window.__DOMAINS__={js_embed(domains or [])};window.__BAL_DEFAULTS__={js_embed(subscriptions._BALANCER_DEFAULTS)};</script>
+<script>window.__GRAPH__={js_embed(graph)};window.__ADMIN__="";window.__CSRF__={js_embed(csrf)};window.__BASE__={js_embed(sub_base)};window.__DOMAINS__={js_embed(domains or [])};window.__BAL_DEFAULTS__={js_embed(subscriptions._BALANCER_DEFAULTS)};window.__PRESETS__={js_embed(subscriptions.ROUTER_PRESETS)};</script>
 <script>{EDITOR_JS}</script>
 </body></html>"""
 

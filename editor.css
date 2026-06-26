@@ -98,6 +98,18 @@ body.unblur .blur{filter:none;cursor:auto}
 /* ноды-группы (страна → балансер) и авто-выбор (все входы → один балансер) */
 .node.group .hd{background:linear-gradient(180deg,#3a6ea5,#2c5680)}
 .node.autoselect .hd{background:linear-gradient(180deg,#3f8f6a,#2c6f54)}
+.node.router .hd{background:linear-gradient(180deg,#7a5ba0,#5a3f80)}
+.node.router .sock.out{background:#b98fe0}
+.rrules{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.rrow{display:flex;gap:5px;align-items:center;background:#242427;border:1px solid #34343a;border-radius:6px;padding:5px}
+.rrow .rval{flex:1;min-width:0}
+.rrow .rval input,.rrow .rval select{width:100%}
+.rrow select{max-width:96px}
+.rarrow{color:#9a8fd0;font-weight:700}
+.rrm{cursor:pointer;color:#cc7777;flex:none;padding:0 3px}
+.rquick{display:flex;flex-wrap:wrap;gap:4px;margin:6px 0}
+.rqbtn{font-size:11px;padding:3px 7px;background:#2e2a3a;border:1px solid #463e5e;border-radius:5px;color:#cbb8ec;cursor:pointer}
+.rqbtn:hover{background:#383150}
 .bucket{display:flex;flex-direction:column;gap:5px;background:#242427;border:1px solid #34343a;
   border-radius:6px;padding:6px;margin-top:6px}
 .bucket.dragover{border-color:#4fb3a6;background:#1f2a29}

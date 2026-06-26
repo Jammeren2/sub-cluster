@@ -732,6 +732,140 @@ def _resolve_group_members(group):
     return configs, leftover, skipped, infos, passthrough
 
 
+# ── нода-роутер (#05, Фаза A): клиентский xray-конфиг с routing.rules ─────────
+# Пресеты: geosite/geoip-категории, понятные xray + штатной geosite.dat (бандлит Happ).
+ROUTER_PRESETS = {
+    "telegram":   {"label": "Telegram",         "domain": ["geosite:telegram"],   "ip": ["geoip:telegram"]},
+    "youtube":    {"label": "YouTube",          "domain": ["geosite:youtube"],    "ip": []},
+    "google":     {"label": "Google",           "domain": ["geosite:google"],     "ip": ["geoip:google"]},
+    "discord":    {"label": "Discord",          "domain": ["geosite:discord"],    "ip": []},
+    "whatsapp":   {"label": "WhatsApp",         "domain": ["geosite:whatsapp"],   "ip": ["geoip:whatsapp"]},
+    "meta":       {"label": "Meta (FB/IG)",     "domain": ["geosite:facebook", "geosite:instagram"], "ip": ["geoip:facebook"]},
+    "netflix":    {"label": "Netflix",          "domain": ["geosite:netflix"],    "ip": ["geoip:netflix"]},
+    "twitch":     {"label": "Twitch",           "domain": ["geosite:twitch"],     "ip": []},
+    "spotify":    {"label": "Spotify",          "domain": ["geosite:spotify"],    "ip": []},
+    "twitter":    {"label": "Twitter / X",      "domain": ["geosite:twitter"],    "ip": ["geoip:twitter"]},
+    "tiktok":     {"label": "TikTok",           "domain": ["geosite:tiktok"],     "ip": []},
+    "cloudflare": {"label": "Cloudflare",       "domain": ["geosite:cloudflare"], "ip": ["geoip:cloudflare"]},
+    "openai":     {"label": "OpenAI / ChatGPT", "domain": ["geosite:openai"],     "ip": []},
+    "ru_inside":  {"label": "Рунет (внутри)",   "domain": ["geosite:category-ru", "geosite:private"], "ip": ["geoip:ru", "geoip:private"]},
+}
+
+
+def _materialize_target_outbounds(tinfo):
+    """Таргет роутера → список xray-outbound'ов (БЕЗ тега; тег ставит вызывающий).
+    link→1; group/auto→все конвертируемые члены; direct/неизвестно→[]."""
+    kind = (tinfo or {}).get("kind")
+    if kind == "link":
+        ob, _ = _link_to_outbound(tinfo.get("link") or "")
+        return [ob] if ob else []
+    if kind in ("group", "auto"):
+        cfgs, _leftover, _skipped, _infos, _pass = _resolve_group_members(tinfo)
+        obs = []
+        for c in cfgs:
+            for o in c.get("outbounds", []):
+                if str(o.get("tag", "")).startswith("proxy-"):
+                    obs.append({k: v for k, v in o.items() if k != "tag"})
+        return obs
+    return []   # direct / неизвестно
+
+
+def _wrap_as_router(targets_resolved, rules, default_target, name, params=None):
+    """Правила (geosite/geoip → target) → ОДИН клиентский xray-конфиг (Фаза A).
+    Каждый таргет → proxy-<tidx>-N; таргет с >1 outbound получает balancer-<tidx>
+    (selector ['proxy-<tidx>-']); 1 outbound → прямой outboundTag. routing.rules в
+    порядке первого совпадения; финал — default. Неконвертируемые/пустой/пропавший/
+    zapret таргет → direct (warn). Структурная функция, как _wrap_as_balancer."""
+    p = _norm_balancer_params(params)
+    outbounds, balancers, observed, skipped_total = [], [], False, 0
+    tag_for = {}                                  # input_id -> ("outbound"|"balancer", tag) | None
+
+    for tidx, tid in enumerate(targets_resolved.keys()):
+        tinfo = targets_resolved[tid]
+        if (tinfo or {}).get("kind") == "direct":
+            continue                              # → штатный freedom 'direct'
+        obs = _materialize_target_outbounds(tinfo)
+        if not obs:
+            skipped_total += 1
+            tag_for[tid] = None                   # → direct
+            continue
+        tagged = []
+        for j, ob in enumerate(obs):
+            ob = dict(ob)
+            ob["tag"] = f"proxy-{tidx}-{j}"
+            outbounds.append(ob)
+            tagged.append(ob["tag"])
+        if len(tagged) == 1:
+            tag_for[tid] = ("outbound", tagged[0])
+        else:
+            btag = f"balancer-{tidx}"
+            balancers.append({"tag": btag, "selector": [f"proxy-{tidx}-"],
+                              "strategy": {"type": p["strategy"]}})
+            tag_for[tid] = ("balancer", btag)
+        observed = True
+
+    outbounds.append({"protocol": "freedom", "tag": "direct"})
+    outbounds.append({"protocol": "blackhole", "tag": "block"})
+
+    def _dest(tid):
+        if tid == "direct" or tid not in tag_for or tag_for[tid] is None:
+            return {"outboundTag": "direct"}
+        kind, val = tag_for[tid]
+        return {"balancerTag": val} if kind == "balancer" else {"outboundTag": val}
+
+    rrules = []
+    for rule in rules:
+        m = rule.get("match") or {}
+        mk, mv = m.get("kind"), m.get("value")
+        if mk == "preset":
+            pr = ROUTER_PRESETS.get(mv)
+            if not pr:
+                continue
+            doms, ips = list(pr.get("domain") or []), list(pr.get("ip") or [])
+        elif mk == "domain":
+            doms, ips = ([mv] if mv else []), []
+        elif mk == "ip":
+            doms, ips = [], ([mv] if mv else [])
+        else:
+            continue
+        if not doms and not ips:
+            continue
+        r = {"type": "field"}
+        if doms:
+            r["domain"] = doms
+        if ips:
+            r["ip"] = ips
+        r.update(_dest(rule.get("target")))
+        rrules.append(r)
+    dflt = {"type": "field", "network": "tcp,udp"}
+    dflt.update(_dest(default_target))
+    rrules.append(dflt)
+
+    if skipped_total:
+        print(f"[-] роутер «{name}»: {skipped_total} таргет(ов) без конвертируемых "
+              f"outbound'ов → их трафик уходит в direct", flush=True)
+
+    cfg = {
+        "remarks": name,
+        "dns": {"servers": ["1.1.1.1", "8.8.8.8"]},
+        "inbounds": [
+            {"tag": "socks", "port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}},
+            {"tag": "http", "port": 10809, "listen": "127.0.0.1", "protocol": "http"},
+        ],
+        "outbounds": outbounds,
+        "routing": {"domainStrategy": p["domain_strategy"], "rules": rrules},
+    }
+    if balancers:
+        cfg["routing"]["balancers"] = balancers
+    if observed:
+        cfg["burstObservatory"] = {
+            "subjectSelector": ["proxy-"],
+            "pingConfig": {"destination": p["probe_url"], "interval": p["interval"],
+                           "timeout": p["timeout"], "sampling": p["sampling"]},
+        }
+    return cfg
+
+
 def build_merged_response(route, spec, announce=""):
     """Слияние подписок и прямых ключей в один ответ.
        spec = {"subs":[{"url","renames"}], "keys":[{"link","name"}]}.
@@ -744,6 +878,7 @@ def build_merged_response(route, spec, announce=""):
     subs = spec.get("subs", []) if isinstance(spec, dict) else []
     keys = spec.get("keys", []) if isinstance(spec, dict) else []
     groups = spec.get("groups", []) if isinstance(spec, dict) else []
+    routers = spec.get("routers", []) if isinstance(spec, dict) else []
 
     json_items = []   # [{"cfg","addr","name","renames"}]  (дедуп по identity без remarks)
     seen_cfg = set()
@@ -813,7 +948,18 @@ def build_merged_response(route, spec, announce=""):
         for k, v in g_pass.items():
             passthrough.setdefault(k, v)
 
-    have_json = bool(json_items) or bool(group_configs)   # балансер форсит JSON
+    # Ноды-роутеры (#05): каждый → один конфиг с routing.rules. Дедуп по id.
+    router_configs, seen_router = [], set()
+    for rt in routers:
+        rid = rt.get("id")
+        if rid in seen_router:
+            continue
+        seen_router.add(rid)
+        router_configs.append(_wrap_as_router(
+            rt.get("targets") or {}, rt.get("rules") or [],
+            rt.get("default_target") or "direct", rt.get("name") or "", rt.get("params")))
+
+    have_json = bool(json_items) or bool(group_configs) or bool(router_configs)   # балансер/роутер форсят JSON
     out_configs = [it["cfg"] for it in json_items]
     out_links = [it["link"] for it in text_items]
     flat = _dedup(out_links + key_links + group_pass)
@@ -838,7 +984,7 @@ def build_merged_response(route, spec, announce=""):
         out_headers.update(passthrough)
         # конфиги-группы (балансеры) идут первыми, затем JSON-ноды источников, затем
         # обёрнутые плоские ссылки; дедуп по полному identity (с remarks).
-        payload = json.dumps(_dedup_configs(group_configs + out_configs + extra),
+        payload = json.dumps(_dedup_configs(router_configs + group_configs + out_configs + extra),
                              ensure_ascii=False).encode("utf-8")
     else:
         # Только плоские источники/ключи (или ничего) — base64-список ссылок.
@@ -864,10 +1010,11 @@ def build_route_response(route, spec=None, announce=""):
     subs = spec.get("subs", [])
     keys = spec.get("keys", [])
     groups = spec.get("groups", [])
+    routers = spec.get("routers", [])
     mode = route.get("mode", "merge")
     has_renames = any((s.get("renames") for s in subs))
-    # Зеркало байт-в-байт возможно только без ключей/групп/переименований и с одной подпиской.
-    if mode == "mirror" and len(subs) == 1 and not keys and not groups and not has_renames:
+    # Зеркало байт-в-байт возможно только без ключей/групп/роутеров/переименований и с одной подпиской.
+    if mode == "mirror" and len(subs) == 1 and not keys and not groups and not routers and not has_renames:
         return build_mirror_response(route, subs[0]["url"], announce)
     return build_merged_response(route, spec, announce)
 

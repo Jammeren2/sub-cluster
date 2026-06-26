@@ -32,15 +32,27 @@
   function isRoute(n){ return G.routes.indexOf(n)>=0; }
   function isGroup(n){ return !!(n && n.type==='group'); }
   function isAuto(n){ return !!(n && n.type==='autoselect'); }
-  function isProc(n){ return isGroup(n) || isAuto(n); }
+  function isRouter(n){ return !!(n && n.type==='router'); }
+  function isBalProc(n){ return isGroup(n) || isAuto(n); }
+  function isProc(n){ return isGroup(n) || isAuto(n) || isRouter(n); }
   function isDirectLink(u){ return /^(vless|vmess|trojan|ss|ssr|hysteria2?|hy2|tuic):\/\//i.test((u||'').trim()); }
   const BAL_DEFAULTS = window.__BAL_DEFAULTS__ || {strategy:'leastPing',probe_url:'http://www.gstatic.com/generate_204',interval:'5m',timeout:'3s',sampling:2,domain_strategy:'AsIs'};
+  const PRESETS = window.__PRESETS__ || {};
   const _DEF_PORTS = {vless:443,trojan:443,tuic:443,hysteria2:443,hy2:443,hysteria:443};
   function linkAddr(url){ try{ const u=new URL((url||'').trim()); const host=(u.hostname||'').toLowerCase(); if(!host) return ''; let port=u.port; if(!port){ port=_DEF_PORTS[(u.protocol||'').replace(':','').toLowerCase()]||''; } return port?(host+':'+port):host; }catch(e){ return ''; } }
 
   // Гидрация ключей/групп/переименований из node_meta (роль ноды выводим из данных, не только из type)
   G.sources.forEach(s=>{
     const meta = G.node_meta[s.id] || {};
+    if(meta.router || s.type==='router'){
+      s.type='router';
+      s.rules = ((meta.router&&meta.router.rules)||[]).map(r=>({
+        match:{kind:(r.match&&r.match.kind)||'preset', value:(r.match&&r.match.value)||''}, target:r.target||'direct'}));
+      s.default_target = (meta.router&&meta.router.default_target) || 'direct';
+      s.gparams = Object.assign({}, (meta.router&&meta.router.params)||{});
+      s.rules = s.rules||[]; s.gparams = s.gparams||{};
+      return;  // роутер не гидрируется как ключ/группа
+    }
     if(meta.autoselect || s.type==='autoselect'){
       s.type='autoselect';
       s.gparams = Object.assign({}, (meta.autoselect&&meta.autoselect.params)||{});
@@ -79,7 +91,7 @@
       const a=w2s(sockPos(s,'out')), b=w2s(sockPos(r,'in'));
       const p=document.createElementNS('http://www.w3.org/2000/svg','path');
       p.setAttribute('d',curve(a,b)); p.setAttribute('class', isRoute(s)?'wire rwire':'wire');
-      p.addEventListener('click',ev=>{ ev.stopPropagation(); const i=G.edges.indexOf(e); if(i>=0)G.edges.splice(i,1); redrawWires(); refreshCounts(); markDirty(); });
+      p.addEventListener('click',ev=>{ ev.stopPropagation(); const i=G.edges.indexOf(e); if(i>=0)G.edges.splice(i,1); redrawWires(); refreshCounts(); markDirty(); refreshRouterTargets(); });
       svg.appendChild(p);
     });
     if(connecting && tempPath) svg.appendChild(tempPath);
@@ -122,7 +134,7 @@
       const arr=isRoute(node)?G.routes:G.sources; const i=arr.indexOf(node); if(i>=0)arr.splice(i,1);
       G.edges=G.edges.filter(ed=>ed.from!==node.id && ed.to!==node.id);
       const dom=nodeEls[node.id]; if(dom)dom.remove(); delete nodeEls[node.id];
-      redrawWires(); refreshCounts(); markDirty();
+      redrawWires(); refreshCounts(); markDirty(); refreshRouterTargets();
     });
   }
 
@@ -147,15 +159,19 @@
     if(target){
       const f=connecting.from, t=target.id, fromNode=findAny(f);
       if(f!==t && !G.edges.some(e=>e.from===f && e.to===t)){
-        if(isProc(target)){
-          // в группу/авто-выбор можно тянуть только из источника/ключа
-          if(isProc(fromNode) || isRoute(fromNode)) showToast('В группу/авто-выбор — только из источника/ключа',true);
+        if(isRouter(target)){
+          // в роутер — из источника/ключа/группы/авто (не router/route)
+          if(isRouter(fromNode) || isRoute(fromNode)) showToast('В роутер — из источника/ключа/группы/авто',true);
+          else { G.edges.push({from:f,to:t}); markDirty(); }
+        } else if(isBalProc(target)){
+          // в группу/авто — только из источника/ключа
+          if(isProc(fromNode) || isRoute(fromNode)) showToast('В группу/авто — только из источника/ключа',true);
           else { G.edges.push({from:f,to:t}); markDirty(); }
         } else if(isRoute(fromNode) && wouldCycle(f,t)){ showToast('Нельзя замкнуть цикл маршрутов',true); }
         else { G.edges.push({from:f,to:t}); markDirty(); }
       }
     }
-    connecting=null; tempPath=null; hoverIn=null; redrawWires(); refreshCounts();
+    connecting=null; tempPath=null; hoverIn=null; redrawWires(); refreshCounts(); refreshRouterTargets();
   }
 
   function outSocket(node){ const out=el('div','sock out'); out.title='Тяни в маршрут/группу'; out.addEventListener('mousedown',ev=>startConnect(ev,node)); return out; }
@@ -341,6 +357,82 @@
     nodeEls[s.id]=n; world.appendChild(n);
   }
 
+  // ── нода-роутер (#05): правила geosite/geoip → таргеты ──
+  function refreshRouterTargets(){ G.sources.forEach(s=>{ if(isRouter(s) && s._refreshTargets) s._refreshTargets(); }); }
+  function routerTargets(s){
+    const froms=G.edges.filter(e=>e.to===s.id).map(e=>e.from);
+    const ins=G.sources.filter(x=>froms.indexOf(x.id)>=0 && !isRouter(x));
+    const opts=[{value:'direct', label:'direct (напрямую)'}];
+    ins.forEach(x=>{ const kind=isGroup(x)?'группа':isAuto(x)?'авто':(x.type==='key'?'ключи':'источник');
+      opts.push({value:x.id, label:((x.label||'').trim()||x.id.slice(0,6))+' ['+kind+']'}); });
+    return opts;
+  }
+  function targetSelect(s,getv,setv){
+    const sel=el('select'), opts=routerTargets(s), cur=getv();
+    let has=false;
+    opts.forEach(o=>{ const op=el('option',null,o.label); op.value=o.value; if(o.value===cur){op.selected=true;has=true;} sel.appendChild(op); });
+    if(!has && cur && cur!=='direct'){ const op=el('option',null,'(отключённый вход '+cur.slice(0,6)+')'); op.value=cur; op.selected=true; sel.appendChild(op); }
+    sel.addEventListener('change',()=>{ setv(sel.value); markDirty(); });
+    return sel;
+  }
+  function makeRouter(s){
+    s.type='router'; s.rules=s.rules||[]; s.gparams=s.gparams||{}; s.default_target=s.default_target||'direct';
+    const n=el('div','node router'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
+    const hd=el('div','hd'); hd.appendChild(el('span',null,'Роутер')); const x=el('span','x','✕'); hd.appendChild(x); n.appendChild(hd);
+    const bd=el('div','bd');
+    bd.appendChild(el('label',null,'Метка / имя записи (видна в клиенте)'));
+    const lab=el('input'); lab.value=s.label||''; lab.placeholder='Роутер'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
+    const info=el('div','muted2'); info.textContent='Правила geosite/geoip → таргеты (вход-ссылка/группа/авто/direct). Порядок = первое совпадение; «остальное» → default. В клиенте одна запись с per-app routing.'; bd.appendChild(info);
+    bd.appendChild(balancerParamsDetails(s));
+    bd.appendChild(el('label',null,'Правила (matcher → таргет)'));
+    const rlist=el('div','rrules'); bd.appendChild(rlist);
+    function renderRules(){
+      rlist.textContent='';
+      s.rules.forEach((r,i)=>{
+        r.match=r.match||{kind:'preset',value:''};
+        const row=el('div','rrow');
+        const ks=el('select'); [['preset','пресет'],['domain','домен'],['ip','IP']].forEach(k=>{ const o=el('option',null,k[1]); o.value=k[0]; if(r.match.kind===k[0])o.selected=true; ks.appendChild(o); });
+        const valWrap=el('div','rval');
+        function renderVal(){
+          valWrap.textContent='';
+          if(r.match.kind==='preset'){
+            const ps=el('select'); Object.keys(PRESETS).forEach(pk=>{ const o=el('option',null,(PRESETS[pk].label||pk)); o.value=pk; if(r.match.value===pk)o.selected=true; ps.appendChild(o); });
+            if(!r.match.value && Object.keys(PRESETS).length){ r.match.value=ps.value; }
+            ps.addEventListener('change',()=>{ r.match.value=ps.value; markDirty(); }); valWrap.appendChild(ps);
+          } else {
+            const ti=el('input'); ti.value=r.match.value||''; ti.placeholder=(r.match.kind==='ip'?'8.8.8.8/32 или geoip:ru':'example.com или geosite:google');
+            ti.addEventListener('input',()=>{ r.match.value=ti.value; markDirty(); }); valWrap.appendChild(ti);
+          }
+        }
+        ks.addEventListener('change',()=>{ r.match.kind=ks.value; r.match.value=''; renderVal(); markDirty(); });
+        const ts=targetSelect(s, ()=>r.target, v=>{ r.target=v; });
+        const rm=el('span','rrm','✕'); rm.addEventListener('mousedown',e=>e.stopPropagation());
+        rm.addEventListener('click',()=>{ s.rules.splice(i,1); renderRules(); markDirty(); });
+        row.appendChild(ks); row.appendChild(valWrap); row.appendChild(el('span','rarrow','→')); row.appendChild(ts); row.appendChild(rm);
+        rlist.appendChild(row); renderVal();
+      });
+      if(!s.rules.length) rlist.appendChild(el('div','muted2','Правил нет. Жми пресет ниже или «+ правило».'));
+    }
+    const quick=el('div','rquick');
+    Object.keys(PRESETS).forEach(pk=>{ const b=el('button','rqbtn',PRESETS[pk].label||pk); b.type='button';
+      b.addEventListener('mousedown',e=>e.stopPropagation());
+      b.addEventListener('click',e=>{ e.stopPropagation(); s.rules.push({match:{kind:'preset',value:pk},target:'direct'}); renderRules(); markDirty(); }); quick.appendChild(b); });
+    bd.appendChild(quick);
+    const addR=el('button','addkey','+ правило'); addR.type='button'; addR.addEventListener('mousedown',e=>e.stopPropagation());
+    addR.addEventListener('click',e=>{ e.stopPropagation(); s.rules.push({match:{kind:'preset',value:Object.keys(PRESETS)[0]||''},target:'direct'}); renderRules(); markDirty(); });
+    bd.appendChild(addR);
+    bd.appendChild(el('label',null,'Остальное (по умолчанию) →'));
+    const defWrap=el('div'); bd.appendChild(defWrap);
+    function renderDefault(){ defWrap.textContent=''; defWrap.appendChild(targetSelect(s, ()=>s.default_target, v=>{ s.default_target=v; })); }
+    const cnt=el('div','cnt'); cnt.dataset.rid=s.id; bd.appendChild(cnt);
+    n.appendChild(bd);
+    dragHeader(hd,s,n); deleteBtn(x,s);
+    n.appendChild(inSocket(s)); n.appendChild(outSocket(s));
+    nodeEls[s.id]=n; world.appendChild(n);
+    s._refreshTargets=()=>{ renderRules(); renderDefault(); };
+    renderRules(); renderDefault();
+  }
+
   // ── переименование ссылок внутри подписки ──
   function getRename(s,addr,name){ const r=(s.renames||[]).find(r=>r.addr===addr && r.name===name); return r?r.to:''; }
   function setRename(s,addr,name,to){
@@ -439,6 +531,8 @@
   if(addGroupBtn) addGroupBtn.addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),type:'group',url:'',label:'',buckets:[],gparams:{},x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeGroup(s); redrawWires(); refreshCounts(); markDirty(); });
   const addAutoBtn=document.getElementById('addAuto');
   if(addAutoBtn) addAutoBtn.addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),type:'autoselect',url:'',label:'',gparams:{},x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeAuto(s); redrawWires(); refreshCounts(); markDirty(); });
+  const addRouterBtn=document.getElementById('addRouter');
+  if(addRouterBtn) addRouterBtn.addEventListener('click',()=>{ const c=centerWorld(); const s={id:genId(),type:'router',url:'',label:'',rules:[],default_target:'direct',gparams:{},x:c.x-NODE_W/2,y:c.y-40}; G.sources.push(s); makeRouter(s); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('addRoute').addEventListener('click',()=>{ const c=centerWorld(); const r={id:genId(),title:'',path:'',mode:'merge',enabled:true,announce:'',domain_id:'',x:c.x-NODE_W/2,y:c.y-70}; G.routes.push(r); makeRoute(r); redrawWires(); refreshCounts(); markDirty(); });
   document.getElementById('reset').addEventListener('click',()=>{ view={panX:60,panY:60,zoom:1}; applyTransform(); redrawWires(); });
   document.getElementById('save').addEventListener('click',()=>save(false));
@@ -460,7 +554,14 @@
     const node_meta={};
     G.sources.forEach(s=>{
       const e={};
-      if(s.type==='autoselect'){
+      if(s.type==='router'){
+        const rules=(s.rules||[]).filter(r=>r.match && (''+(r.match.value||'')).trim())
+          .map(r=>({match:{kind:r.match.kind,value:(''+r.match.value).trim()},target:r.target||'direct'}));
+        const params={};
+        ['strategy','probe_url','interval','timeout','sampling','domain_strategy'].forEach(k=>{
+          if(s.gparams && s.gparams[k]!=null && s.gparams[k]!=='') params[k]=s.gparams[k]; });
+        e.router={rules:rules, default_target:s.default_target||'direct', params:params};   // всегда пишем
+      } else if(s.type==='autoselect'){
         const params={};
         ['strategy','probe_url','interval','timeout','sampling','domain_strategy'].forEach(k=>{
           if(s.gparams && s.gparams[k]!=null && s.gparams[k]!=='') params[k]=s.gparams[k]; });
@@ -505,7 +606,8 @@
 
   applyTransform();
   G.sources.forEach(s=>{
-    if(s.type==='autoselect' || (G.node_meta[s.id]||{}).autoselect) makeAuto(s);
+    if(s.type==='router' || (G.node_meta[s.id]||{}).router) makeRouter(s);
+    else if(s.type==='autoselect' || (G.node_meta[s.id]||{}).autoselect) makeAuto(s);
     else if(s.type==='group' || (G.node_meta[s.id]||{}).group) makeGroup(s);
     else if(s.type==='key' || (s.keys&&s.keys.length)) makeKey(s);
     else makeSource(s);

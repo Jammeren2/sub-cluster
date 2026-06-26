@@ -175,6 +175,8 @@ KEYS_PER_NODE_MAX = 64
 RENAMES_PER_NODE_MAX = 512
 GROUP_BUCKETS_MAX = 64
 BUCKET_MEMBERS_MAX = 256
+ROUTER_RULES_MAX = 64
+ROUTER_VALUE_MAX = 256
 LINK_MAX = 2048
 NAME_MAX = 200
 NODE_META_BYTES_MAX = 256 * 1024
@@ -259,13 +261,36 @@ def _node_autoselect(source, node_meta):
     return a if isinstance(a, dict) else {"params": {}}
 
 
+def _is_router_node(source, node_meta):
+    """Нода-роутер (#05): по правилам geosite/geoip раскидывает трафик по таргетам."""
+    sid = source.get("id")
+    meta = (node_meta or {}).get(sid) or {}
+    if isinstance(meta.get("router"), dict):
+        return True
+    return source.get("type") == "router"
+
+
+def _node_router(source, node_meta):
+    """Конфиг роутера {rules, default_target, params}, если это роутер; иначе None."""
+    if not _is_router_node(source, node_meta):
+        return None
+    r = ((node_meta or {}).get(source.get("id")) or {}).get("router")
+    return r if isinstance(r, dict) else {"rules": [], "default_target": "direct", "params": {}}
+
+
 def _is_proc_node(source, node_meta):
-    """Обрабатывающая нода (группа ИЛИ авто-выбор): берёт source/key, отдаёт в маршрут."""
+    """Обрабатывающая нода (группа/авто/роутер): carry, не в upstreams, резолв→spec."""
+    return (_is_group_node(source, node_meta) or _is_autoselect_node(source, node_meta)
+            or _is_router_node(source, node_meta))
+
+
+def _is_balancer_proc(source, node_meta):
+    """ТОЛЬКО group/auto: их вход — строго source/key (не proc, не router). Для save_graph."""
     return _is_group_node(source, node_meta) or _is_autoselect_node(source, node_meta)
 
 
-# _is_key_node/_node_keys уже возвращают False/None для группы/авто (нет meta["keys"],
-# type != "key", url == "") — отдельная проверка не нужна.
+# _is_key_node/_node_keys уже возвращают False/None для группы/авто/роутера (нет
+# meta["keys"], type != "key", url == "") — отдельная проверка не нужна.
 
 
 def _norm_name(v):
@@ -336,6 +361,32 @@ def _norm_node_meta(raw, id_map, valid_ids):
         auto = meta.get("autoselect")
         if isinstance(auto, dict):
             entry["autoselect"] = {"params": subs._norm_balancer_params(auto.get("params"))}
+        rt = meta.get("router")
+        if isinstance(rt, dict):
+            def _map_target(t):
+                # target — id другой ноды; зеркалим remap рёбер/ключей; неизвестный → direct (GC)
+                t = str(t or "").strip()
+                if not t or t == "direct":
+                    return "direct"
+                mapped = id_map.get(t, t)
+                return mapped if mapped in valid_ids else "direct"
+            rrules = []
+            for r in (rt.get("rules") or [])[:ROUTER_RULES_MAX]:
+                if not isinstance(r, dict):
+                    continue
+                m = r.get("match") or {}
+                mk = m.get("kind")
+                if mk not in ("preset", "domain", "ip"):
+                    continue
+                mv = str(m.get("value") or "").strip()[:ROUTER_VALUE_MAX]
+                if not mv:
+                    continue
+                rrules.append({"match": {"kind": mk, "value": mv}, "target": _map_target(r.get("target"))})
+            entry["router"] = {
+                "rules": rrules,
+                "default_target": _map_target(rt.get("default_target")),
+                "params": subs._norm_balancer_params(rt.get("params")),
+            }
         if entry:
             out[nid] = entry
     return out
@@ -494,6 +545,7 @@ def resolve_links_spec(store, route):
     subs, sub_by_url = [], {}
     keys, seen_key = [], set()
     groups, seen_groups = [], set()
+    routers, seen_routers = [], set()
     visited = set()
     # Итеративный DFS (а не рекурсия) — глубина цепочки не упирается в лимит стека.
     stack = [route.get("id")]
@@ -508,8 +560,13 @@ def resolve_links_spec(store, route):
         for fid in incoming.get(rid, []):
             if fid in src_by_id:
                 s = src_by_id[fid]
-                if _is_proc_node(s, node_meta):
-                    if fid not in seen_groups:    # proc-нода на входе двух маршрутов — резолвим раз
+                if _is_router_node(s, node_meta):   # роутер — раньше proc-ветки (он тоже proc)
+                    if fid not in seen_routers:
+                        seen_routers.add(fid)
+                        routers.append(_resolve_router(s, node_meta, incoming, src_by_id))
+                    continue
+                if _is_proc_node(s, node_meta):      # теперь = group/auto (роутер отсечён выше)
+                    if fid not in seen_groups:
                         seen_groups.add(fid)
                         groups.append(_resolve_proc(s, node_meta, incoming, src_by_id))
                     continue
@@ -532,7 +589,48 @@ def resolve_links_spec(store, route):
                             existing["renames"].extend(renames)
             elif fid in routes_by_id:
                 stack.append(fid)
-    return {"subs": subs, "keys": keys, "groups": groups}
+    return {"subs": subs, "keys": keys, "groups": groups, "routers": routers}
+
+
+def _resolve_router(router_node, node_meta, incoming, src_by_id):
+    """Вход роутера → таргеты по input_id. source/key→link (ключ с N ссылок и source-
+    подписка → kind:auto-обёртка); group/auto→_resolve_proc (2-й hop, bounded: их входы
+    только source/key). Cycle-safe (роутер не принимает router/route). rules/default_target
+    из node_meta (уже отремаплены save_graph); отсутствующий таргет → direct."""
+    rdef = _node_router(router_node, node_meta) or {}
+    targets = {}
+    for fid in incoming.get(router_node.get("id"), []):
+        s = src_by_id.get(fid)
+        if s is None or _is_router_node(s, node_meta):
+            continue
+        if _is_balancer_proc(s, node_meta):                         # group/auto → 2-й hop
+            res = _resolve_proc(s, node_meta, incoming, src_by_id)
+            res["kind"] = "auto" if _is_autoselect_node(s, node_meta) else "group"
+            targets[fid] = res
+            continue
+        nk = _node_keys(s, node_meta)                               # ключ-нода
+        if nk is not None:
+            links = [k["link"] for k in nk if (k.get("link") or "").strip()]
+            if len(links) == 1:
+                targets[fid] = {"kind": "link", "link": links[0]}
+            elif links:                                             # >1 ключ → авто-балансер
+                targets[fid] = {"kind": "auto", "name": s.get("label") or "", "params": {},
+                                "auto": True, "buckets": [], "subs": [],
+                                "keys": [{"link": l, "name": ""} for l in links]}
+            continue
+        url = (s.get("url") or "").strip()                          # source-подписка
+        if url:
+            renames = ((node_meta.get(fid) or {}).get("renames")) or []
+            targets[fid] = {"kind": "auto", "name": s.get("label") or "", "params": {},
+                            "auto": True, "buckets": [],
+                            "subs": [{"url": url, "renames": list(renames)}], "keys": []}
+    valid = set(targets) | {"direct"}
+    rules = [{"match": r.get("match"),
+              "target": (r.get("target") if r.get("target") in valid else "direct")}
+             for r in (rdef.get("rules") or [])]
+    dflt = rdef.get("default_target") if rdef.get("default_target") in valid else "direct"
+    return {"id": router_node.get("id"), "name": router_node.get("label") or "",
+            "params": rdef.get("params") or {}, "rules": rules, "default_target": dflt, "targets": targets}
 
 
 def _resolve_proc(proc_node, node_meta, incoming, src_by_id):
@@ -745,7 +843,7 @@ def save_graph(store, data):
             "id": sid,
             "url": str(s.get("url") or "").strip()[:2048],
             "label": str(s.get("label") or "").strip()[:120],
-            "type": str(s.get("type") or "source") if str(s.get("type") or "") in ("source", "key", "group", "autoselect") else "source",
+            "type": str(s.get("type") or "source") if str(s.get("type") or "") in ("source", "key", "group", "autoselect", "router") else "source",
             "x": _num(s.get("x"), 80.0), "y": _num(s.get("y"), 80.0),
         })
 
@@ -790,10 +888,13 @@ def save_graph(store, data):
     if errors:
         return False, errors
 
-    # Рёбра. Обрабатывающие ноды (группа/авто-выбор) берут только source/key и отдают
-    # в маршрут. Разрешено: source/key→proc, source/key→route, proc→route, route→route.
-    # Запрещено: proc→proc, route→proc, самопетли, циклы.
-    proc_ids = {s["id"] for s in sources if s["type"] in ("group", "autoselect")}
+    # Рёбра. Балансер-ноды (группа/авто) берут только source/key. Роутер берёт
+    # source/key И группу/авто (его таргеты). Разрешено: source/key→{bal,router,route};
+    # group/auto→{router,route}; router→route; route→route. Запрещено: bal←proc/route,
+    # router←router/route, router→{router,bal}, самопетли, циклы.
+    bal_proc_ids = {s["id"] for s in sources if s["type"] in ("group", "autoselect")}
+    router_ids = {s["id"] for s in sources if s["type"] == "router"}
+    proc_ids = bal_proc_ids | router_ids
     plain_src_ids = src_ids - proc_ids
     edges, seen_edge = [], set()
     radj = {}  # обрабатывающая нода (proc/маршрут) -> входы, для проверки циклов
@@ -806,12 +907,23 @@ def save_graph(store, data):
         if fr == to or key in seen_edge:
             continue
         to_route = to in route_ids
-        to_proc = to in proc_ids
-        if not (to_route or to_proc):
+        to_bal = to in bal_proc_ids
+        to_router = to in router_ids
+        if not (to_route or to_bal or to_router):
             continue
-        if to_proc:
-            # в группу/авто можно только из источника/ключа (не proc→proc, не route→proc)
+        if to_bal:
+            # в группу/авто — только из источника/ключа (как было)
             if fr in plain_src_ids:
+                seen_edge.add(key)
+                edges.append({"from": fr, "to": to})
+            continue
+        if to_router:
+            # в роутер — из source/key ИЛИ group/auto (его таргеты); не router/route
+            if fr in plain_src_ids:
+                seen_edge.add(key)
+                edges.append({"from": fr, "to": to})
+            elif fr in bal_proc_ids and not _creates_cycle(radj, fr, to):
+                radj.setdefault(to, []).append(fr)
                 seen_edge.add(key)
                 edges.append({"from": fr, "to": to})
             continue
@@ -819,7 +931,7 @@ def save_graph(store, data):
         if fr in plain_src_ids:                                   # source/key → route
             seen_edge.add(key)
             edges.append({"from": fr, "to": to})
-        elif fr in proc_ids and not _creates_cycle(radj, fr, to):   # group/auto → route
+        elif fr in proc_ids and not _creates_cycle(radj, fr, to):   # group/auto/router → route
             radj.setdefault(to, []).append(fr)
             seen_edge.add(key)
             edges.append({"from": fr, "to": to})
