@@ -74,14 +74,21 @@ def unavailable_reason():
 
 
 def _run(cmd, log=None):
+    log = log or (lambda m: print(m, flush=True))
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-        if r.returncode != 0 and log:
-            log(f"  ! {' '.join(cmd[:2])}: rc={r.returncode} {(r.stderr or '').strip()[:200]}")
+        if r.returncode != 0:
+            err = (r.stderr or "").strip()
+            log(f"  ! {' '.join(cmd[:2])}: rc={r.returncode} {err[:200]}")
+            if any(s in err.lower() for s in ("permitted", "denied", "permission")):
+                log("    ↳ нет NET_ADMIN/NET_RAW: Coolify → Custom Docker Options: "
+                    "--cap-add=NET_ADMIN --cap-add=NET_RAW (или Docker Compose build pack)")
         return r.returncode == 0
+    except FileNotFoundError:
+        log(f"  ! {cmd[0]} не найден в контейнере (образ собран без него — нужен Docker Compose build pack)")
+        return False
     except Exception as e:
-        if log:
-            log(f"  ! {' '.join(cmd[:2])}: {e}")
+        log(f"  ! {' '.join(cmd[:2])}: {e}")
         return False
 
 

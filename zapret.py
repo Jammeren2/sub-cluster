@@ -294,8 +294,16 @@ def _run_cmd(cmd, log_cb):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if r.returncode != 0 and log_cb:
-            log_cb(f"    ! {' '.join(cmd[:2])}: rc={r.returncode} {(r.stderr or '').strip()[:200]}")
+            err = (r.stderr or "").strip()
+            log_cb(f"    ! {' '.join(cmd[:2])}: rc={r.returncode} {err[:200]}")
+            if any(s in err.lower() for s in ("permitted", "denied", "permission")):
+                log_cb("      ↳ нет прав на iptables/NFQUEUE: дай контейнеру NET_ADMIN/NET_RAW "
+                       "(Coolify → Custom Docker Options: --cap-add=NET_ADMIN --cap-add=NET_RAW)")
         return r.returncode == 0
+    except FileNotFoundError:
+        if log_cb:
+            log_cb(f"    ! {cmd[0]} не найден в контейнере (образ собран без него; см. /zapret-баннер)")
+        return False
     except Exception as e:
         if log_cb:
             log_cb(f"    ! {' '.join(cmd[:2])}: {e}")
@@ -325,6 +333,10 @@ def apply_strategy(params, log_cb=None):
         # NFQUEUE-правила строим из портов стратегии (--filter-tcp/--filter-udp по всем
         # секциям); если портов нет — дефолт tcp 80/443. Контейнерные правила, host не трогаем.
         ports = _collect_filter_ports(toks)
+        if shutil.which("iptables") is None and log_cb:
+            log_cb("  ⚠ iptables нет в контейнере — NFQUEUE-правила не поставить (трафик в очередь "
+                   "не пойдёт). Образ собран без iptables (Coolify/Nixpacks). Решение: Docker Compose "
+                   "build pack, либо узел доставит iptables сам на старте при ZAPRET=true (перезапусти).")
         specs = []
         tcp_ports = ports["tcp"] or ["80", "443"]
         specs.append(["-p", "tcp", "-m", "multiport", "--dports", _ports_to_multiport(tcp_ports)])

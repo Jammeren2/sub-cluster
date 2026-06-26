@@ -150,7 +150,35 @@ def ensure_xray(log=print):
         return None
 
 
+def ensure_iptables(log=print):
+    """iptables нужен для NFQUEUE-правил. В Nixpacks-образе его нет → ставим apt'ом
+    (best-effort, как root; заодно libcap2-bin для setcap). На Dockerfile/compose-сборке
+    он уже есть. → True если iptables доступен."""
+    import shutil
+    if shutil.which("iptables"):
+        return True
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        log("[provision] iptables нет в образе — ставлю apt'ом (нужен root) …")
+        env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+        subprocess.run(["apt-get", "update"], capture_output=True, text=True, timeout=120, env=env)
+        r = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", "iptables", "libcap2-bin"],
+                           capture_output=True, text=True, timeout=300, env=env)
+        if shutil.which("iptables"):
+            log("[provision] iptables установлен")
+            return True
+        log(f"[provision] apt iptables не удался: {(r.stderr or '').strip()[:160]} — "
+            "собери через Docker Compose build pack (Dockerfile ставит iptables)")
+        return False
+    except Exception as e:
+        log(f"[provision] iptables: {e}")
+        return False
+
+
 def ensure_all(log=print):
-    """Доустановить nfqws и xray, если их нет (на старте, при ZAPRET=true)."""
+    """Доустановить iptables + nfqws + xray, если их нет (на старте, при ZAPRET=true).
+    iptables первым — он тянет libcap2-bin (setcap) для последующей раздачи caps бинарникам."""
+    ensure_iptables(log)
     ensure_zapret(log)
     ensure_xray(log)
