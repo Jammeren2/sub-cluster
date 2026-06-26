@@ -160,12 +160,14 @@
       const f=connecting.from, t=target.id, fromNode=findAny(f);
       if(f!==t && !G.edges.some(e=>e.from===f && e.to===t)){
         if(isRouter(target)){
-          // в роутер — из источника/ключа/группы/авто (не router/route)
-          if(isRouter(fromNode) || isRoute(fromNode)) showToast('В роутер — из источника/ключа/группы/авто',true);
+          // в роутер — из источника/ключа/группы/авто/МАРШРУТА (не из роутера)
+          if(isRouter(fromNode)) showToast('В роутер — не из роутера',true);
+          else if(isRoute(fromNode) && wouldCycle(f,t)) showToast('Нельзя замкнуть цикл',true);
           else { G.edges.push({from:f,to:t}); markDirty(); }
         } else if(isBalProc(target)){
-          // в группу/авто — только из источника/ключа
-          if(isProc(fromNode) || isRoute(fromNode)) showToast('В группу/авто — только из источника/ключа',true);
+          // в группу/авто — из источника/ключа ИЛИ МАРШРУТА (не из группы/авто/роутера)
+          if(isProc(fromNode)) showToast('В группу/авто — не из группы/авто/роутера',true);
+          else if(isRoute(fromNode) && wouldCycle(f,t)) showToast('Нельзя замкнуть цикл',true);
           else { G.edges.push({from:f,to:t}); markDirty(); }
         } else if(isRoute(fromNode) && wouldCycle(f,t)){ showToast('Нельзя замкнуть цикл маршрутов',true); }
         else { G.edges.push({from:f,to:t}); markDirty(); }
@@ -362,9 +364,11 @@
   function routerTargets(s){
     const froms=G.edges.filter(e=>e.to===s.id).map(e=>e.from);
     const ins=G.sources.filter(x=>froms.indexOf(x.id)>=0 && !isRouter(x));
+    const rins=G.routes.filter(x=>froms.indexOf(x.id)>=0);
     const opts=[{value:'direct', label:'direct (напрямую)'}];
     ins.forEach(x=>{ const kind=isGroup(x)?'группа':isAuto(x)?'авто':(x.type==='key'?'ключи':'источник');
       opts.push({value:x.id, label:((x.label||'').trim()||x.id.slice(0,6))+' ['+kind+']'}); });
+    rins.forEach(x=>{ opts.push({value:x.id, label:((x.title||x.path||'').trim()||x.id.slice(0,6))+' [маршрут]'}); });
     return opts;
   }
   function targetSelect(s,getv,setv){

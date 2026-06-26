@@ -1002,19 +1002,20 @@ def t_autoselect_resolve_save():
 
 
 def t_autoselect_edges():
-    print("\n[43] авто-выбор: запрещённые рёбра отбрасываются (proc→proc, route→proc)")
+    print("\n[43] авто-выбор: рёбра (proc→proc запрещено; route→proc теперь разрешено)")
     st = new_store()
     data = {
         "sources": [
             {"id": "a1aaaaaa", "type": "autoselect", "url": "", "label": "A"},
             {"id": "a2bbbbbb", "type": "autoselect", "url": "", "label": "B"},
             {"id": "g1gggggg", "type": "group", "url": "", "label": "G"}],
-        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True},
+                   {"id": "r2dddddd", "path": "/y", "mode": "merge", "enabled": True}],
         "edges": [
             {"from": "a1aaaaaa", "to": "a2bbbbbb"},   # auto→auto запрещено
-            {"from": "r1cccccc", "to": "a1aaaaaa"},   # route→auto запрещено
+            {"from": "r1cccccc", "to": "a1aaaaaa"},   # route→auto ТЕПЕРЬ РАЗРЕШЕНО
             {"from": "g1gggggg", "to": "a1aaaaaa"},   # group→auto (proc→proc) запрещено
-            {"from": "a1aaaaaa", "to": "r1cccccc"}],  # auto→route ок
+            {"from": "a1aaaaaa", "to": "r2dddddd"}],  # auto→route ок (другой маршрут, без цикла)
         "node_meta": {"a1aaaaaa": {"autoselect": {"params": {}}},
                       "a2bbbbbb": {"autoselect": {"params": {}}},
                       "g1gggggg": {"group": {"buckets": [{"name": "G", "members": [{"link": "vless://x@h:443#K"}]}]}}},
@@ -1023,9 +1024,41 @@ def t_autoselect_edges():
     check("save_graph ok", ok, errs)
     edges = st.get_config()["edges"]
     check("auto→auto отброшено", not any(e["from"] == "a1aaaaaa" and e["to"] == "a2bbbbbb" for e in edges))
-    check("route→auto отброшено", not any(e["from"] == "r1cccccc" and e["to"] == "a1aaaaaa" for e in edges))
+    check("route→auto РАЗРЕШЕНО", any(e["from"] == "r1cccccc" and e["to"] == "a1aaaaaa" for e in edges))
     check("group→auto (proc→proc) отброшено", not any(e["from"] == "g1gggggg" and e["to"] == "a1aaaaaa" for e in edges))
-    check("auto→route сохранено", any(e["from"] == "a1aaaaaa" and e["to"] == "r1cccccc" for e in edges))
+    check("auto→route сохранено", any(e["from"] == "a1aaaaaa" and e["to"] == "r2dddddd" for e in edges))
+
+
+def t_route_into_proc_resolve():
+    print("\n[43b] маршрут на входе авто-выбора: его ссылки вливаются членами (resolve)")
+    st = new_store()
+    data = {
+        "sources": [
+            {"id": "k0aaaaaa", "type": "key", "url": "", "label": "K"},
+            {"id": "auBBBBBB", "type": "autoselect", "url": "", "label": "AUTO"}],
+        "routes": [{"id": "rIN00000", "path": "/in", "mode": "merge", "enabled": True},
+                   {"id": "rOUT0000", "path": "/out", "mode": "merge", "enabled": True}],
+        "edges": [
+            {"from": "k0aaaaaa", "to": "rIN00000"},   # key → маршрут(/in)
+            {"from": "rIN00000", "to": "auBBBBBB"},   # маршрут(/in) → авто-выбор (НОВОЕ)
+            {"from": "auBBBBBB", "to": "rOUT0000"}],   # авто-выбор → маршрут(/out)
+        "node_meta": {
+            "k0aaaaaa": {"keys": [{"link": "vless://k1@h1:443?type=tcp#K1", "name": ""},
+                                  {"link": "vless://k2@h2:443?type=tcp#K2", "name": ""}]},
+            "auBBBBBB": {"autoselect": {"params": {}}}},
+    }
+    ok, errs = graph.save_graph(st, data)
+    check("save_graph ok", ok, errs)
+    E = st.get_config()["edges"]
+    check("ребро маршрут→авто сохранено", any(e["from"] == "rIN00000" and e["to"] == "auBBBBBB" for e in E))
+    rout = next(r for r in graph.get_routes(st) if r["path"] == "/out")
+    spec = graph.resolve_links_spec(st, rout)
+    check("есть один proc (авто-выбор)", len(spec["groups"]) == 1, spec["groups"])
+    g = spec["groups"][0]
+    links = {k["link"] for k in g.get("keys", [])}
+    check("ссылки маршрута влились в авто-выбор",
+          "vless://k1@h1:443?type=tcp#K1" in links and "vless://k2@h2:443?type=tcp#K2" in links, links)
+    check("авто-выбор auto=True", g.get("auto") is True)
 
 
 # ── zapret (обход DPI): валидация, baseline, авто-тест, фоновый прогон, store ──
@@ -1406,7 +1439,8 @@ def t_router_edges():
             {"id": "rt000000", "type": "router", "url": "", "label": "R1"},
             {"id": "rt111111", "type": "router", "url": "", "label": "R2"},
             {"id": "k1kkkkkk", "type": "key", "url": ""}],
-        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True}],
+        "routes": [{"id": "r1cccccc", "path": "/x", "mode": "merge", "enabled": True},
+                   {"id": "r2dddddd", "path": "/y", "mode": "merge", "enabled": True}],
         "edges": [
             {"from": "g1gggggg", "to": "rt000000"},
             {"from": "k1kkkkkk", "to": "rt000000"},
@@ -1414,7 +1448,7 @@ def t_router_edges():
             {"from": "r1cccccc", "to": "rt000000"},
             {"from": "rt000000", "to": "g1gggggg"},
             {"from": "g1gggggg", "to": "a1aaaaaa"},
-            {"from": "rt000000", "to": "r1cccccc"}],
+            {"from": "rt000000", "to": "r2dddddd"}],
         "node_meta": {
             "g1gggggg": {"group": {"buckets": [{"name": "G", "members": [{"link": "vless://x@h:443#K"}]}]}},
             "a1aaaaaa": {"autoselect": {"params": {}}},
@@ -1431,10 +1465,10 @@ def t_router_edges():
     check("group→router сохранено", has("g1gggggg", "rt000000"))
     check("key→router сохранено", has("k1kkkkkk", "rt000000"))
     check("router→router отброшено", not has("rt111111", "rt000000"))
-    check("route→router отброшено", not has("r1cccccc", "rt000000"))
+    check("route→router РАЗРЕШЕНО", has("r1cccccc", "rt000000"))
     check("router→group отброшено", not has("rt000000", "g1gggggg"))
     check("group→auto отброшено (регрессия)", not has("g1gggggg", "a1aaaaaa"))
-    check("router→route сохранено", has("rt000000", "r1cccccc"))
+    check("router→route сохранено", has("rt000000", "r2dddddd"))
 
 
 def t_router_sync_safety():
@@ -1472,7 +1506,7 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_group_save_carry, t_group_sync_safety, t_group_rename_then_group_order,
           t_group_rename_match_original, t_group_nameless_bucket_kept, t_group_resolve_dedup,
           t_autoselect_emit, t_autoselect_nonconvertible, t_autoselect_resolve_save,
-          t_autoselect_edges,
+          t_autoselect_edges, t_route_into_proc_resolve,
           t_zapret_validate, t_zapret_baseline, t_zapret_autotest_best,
           t_zapret_runstate, t_zapret_store, t_zapret_defaults, t_zapret_no_run_collision,
           t_router_config_shape, t_gateway_config, t_router_custom_domain_ip, t_router_default_target,

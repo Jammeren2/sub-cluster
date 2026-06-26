@@ -563,12 +563,12 @@ def resolve_links_spec(store, route):
                 if _is_router_node(s, node_meta):   # роутер — раньше proc-ветки (он тоже proc)
                     if fid not in seen_routers:
                         seen_routers.add(fid)
-                        routers.append(_resolve_router(s, node_meta, incoming, src_by_id))
+                        routers.append(_resolve_router(s, node_meta, incoming, src_by_id, routes_by_id))
                     continue
                 if _is_proc_node(s, node_meta):      # теперь = group/auto (роутер отсечён выше)
                     if fid not in seen_groups:
                         seen_groups.add(fid)
-                        groups.append(_resolve_proc(s, node_meta, incoming, src_by_id))
+                        groups.append(_resolve_proc(s, node_meta, incoming, src_by_id, routes_by_id))
                     continue
                 node_keys = _node_keys(s, node_meta)
                 if node_keys is not None:
@@ -592,19 +592,69 @@ def resolve_links_spec(store, route):
     return {"subs": subs, "keys": keys, "groups": groups, "routers": routers}
 
 
-def _resolve_router(router_node, node_meta, incoming, src_by_id):
+def _route_flat_io(rid, routes_by_id, incoming, src_by_id, node_meta):
+    """Маршрут на ВХОДЕ proc-ноды → его плоские (subs, keys): рекурсивно собираем
+    source/key, питающие этот маршрут (и вложенные маршруты). Вложенные group/auto/router
+    маршрута НЕ разворачиваем в члены родителя (их балансировка не плоская) — пропускаем.
+    Циклобезопасно (local visited)."""
+    subs, keys, sub_by_url, seen_k = [], [], {}, set()
+    stack, local_seen = [rid], set()
+    while stack:
+        cur = stack.pop()
+        if cur in local_seen:
+            continue
+        local_seen.add(cur)
+        r = routes_by_id.get(cur)
+        if not r or not r.get("enabled", True):
+            continue
+        for fid in incoming.get(cur, []):
+            if fid in routes_by_id:
+                stack.append(fid)
+                continue
+            s = src_by_id.get(fid)
+            if s is None or _is_proc_node(s, node_meta):
+                continue
+            nk = _node_keys(s, node_meta)
+            if nk is not None:
+                for k in nk:
+                    if k["link"] not in seen_k:
+                        seen_k.add(k["link"])
+                        keys.append(k)
+            else:
+                url = (s.get("url") or "").strip()
+                if url:
+                    renames = ((node_meta.get(fid) or {}).get("renames")) or []
+                    ex = sub_by_url.get(url)
+                    if ex is None:
+                        entry = {"url": url, "renames": list(renames)}
+                        subs.append(entry)
+                        sub_by_url[url] = entry
+                    else:
+                        ex["renames"].extend(renames)
+    return subs, keys
+
+
+def _resolve_router(router_node, node_meta, incoming, src_by_id, routes_by_id=None):
     """Вход роутера → таргеты по input_id. source/key→link (ключ с N ссылок и source-
     подписка → kind:auto-обёртка); group/auto→_resolve_proc (2-й hop, bounded: их входы
-    только source/key). Cycle-safe (роутер не принимает router/route). rules/default_target
-    из node_meta (уже отремаплены save_graph); отсутствующий таргет → direct."""
+    только source/key); МАРШРУТ→kind:auto из его плоских ссылок. Cycle-safe (роутер не
+    принимает router). rules/default_target из node_meta; отсутствующий таргет → direct."""
+    routes_by_id = routes_by_id or {}
     rdef = _node_router(router_node, node_meta) or {}
     targets = {}
     for fid in incoming.get(router_node.get("id"), []):
+        if fid in routes_by_id:                                     # МАРШРУТ на входе → auto-таргет
+            r_subs, r_keys = _route_flat_io(fid, routes_by_id, incoming, src_by_id, node_meta)
+            if r_subs or r_keys:
+                rt = routes_by_id[fid]
+                targets[fid] = {"kind": "auto", "name": rt.get("title") or rt.get("path") or "",
+                                "params": {}, "auto": True, "buckets": [], "subs": r_subs, "keys": r_keys}
+            continue
         s = src_by_id.get(fid)
         if s is None or _is_router_node(s, node_meta):
             continue
         if _is_balancer_proc(s, node_meta):                         # group/auto → 2-й hop
-            res = _resolve_proc(s, node_meta, incoming, src_by_id)
+            res = _resolve_proc(s, node_meta, incoming, src_by_id, routes_by_id)
             res["kind"] = "auto" if _is_autoselect_node(s, node_meta) else "group"
             targets[fid] = res
             continue
@@ -633,13 +683,29 @@ def _resolve_router(router_node, node_meta, incoming, src_by_id):
             "params": rdef.get("params") or {}, "rules": rules, "default_target": dflt, "targets": targets}
 
 
-def _resolve_proc(proc_node, node_meta, incoming, src_by_id):
-    """Вход группы/авто-выбора — всегда source/key (рёбра гарантирует save_graph), поэтому
-    без рекурсии/циклов: собираем подписки и прямые ключи, питающие ноду. Авто-выбор →
+def _resolve_proc(proc_node, node_meta, incoming, src_by_id, routes_by_id=None):
+    """Вход группы/авто-выбора — source/key ИЛИ МАРШРУТ (его плоские ссылки вливаются
+    членами). Вложенные group/auto/router-входы не поддерживаем. Авто-выбор →
     {auto:True, без корзин}; группа → {buckets}."""
+    routes_by_id = routes_by_id or {}
     g_subs, g_keys, seen_k = [], [], set()
     g_sub_by_url = {}
     for fid in incoming.get(proc_node.get("id"), []):
+        if fid in routes_by_id:                       # МАРШРУТ на входе → его плоские ссылки
+            r_subs, r_keys = _route_flat_io(fid, routes_by_id, incoming, src_by_id, node_meta)
+            for entry in r_subs:
+                ex = g_sub_by_url.get(entry["url"])
+                if ex is None:
+                    e2 = {"url": entry["url"], "renames": list(entry.get("renames") or [])}
+                    g_subs.append(e2)
+                    g_sub_by_url[entry["url"]] = e2
+                else:
+                    ex["renames"].extend(entry.get("renames") or [])
+            for k in r_keys:
+                if k["link"] not in seen_k:
+                    seen_k.add(k["link"])
+                    g_keys.append(k)
+            continue
         s = src_by_id.get(fid)
         if s is None or _is_proc_node(s, node_meta):
             continue  # вложенные proc-ноды не поддерживаем
@@ -912,17 +978,21 @@ def save_graph(store, data):
         if not (to_route or to_bal or to_router):
             continue
         if to_bal:
-            # в группу/авто — только из источника/ключа (как было)
+            # в группу/авто — из источника/ключа ИЛИ из МАРШРУТА (route → вход)
             if fr in plain_src_ids:
+                seen_edge.add(key)
+                edges.append({"from": fr, "to": to})
+            elif fr in route_ids and not _creates_cycle(radj, fr, to):
+                radj.setdefault(to, []).append(fr)
                 seen_edge.add(key)
                 edges.append({"from": fr, "to": to})
             continue
         if to_router:
-            # в роутер — из source/key ИЛИ group/auto (его таргеты); не router/route
+            # в роутер — из source/key, group/auto (таргеты) ИЛИ МАРШРУТА; не router→router
             if fr in plain_src_ids:
                 seen_edge.add(key)
                 edges.append({"from": fr, "to": to})
-            elif fr in bal_proc_ids and not _creates_cycle(radj, fr, to):
+            elif (fr in bal_proc_ids or fr in route_ids) and not _creates_cycle(radj, fr, to):
                 radj.setdefault(to, []).append(fr)
                 seen_edge.add(key)
                 edges.append({"from": fr, "to": to})
