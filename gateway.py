@@ -45,7 +45,7 @@ def xray_path():
     w = shutil.which("xray")
     if w:
         return w
-    for c in ("/usr/local/bin/xray", "/opt/xray/xray", "/usr/bin/xray"):
+    for c in ("/usr/local/bin/xray", "/opt/xray/xray", "/data/xray/xray", "/usr/bin/xray"):
         if os.path.exists(c):
             return c
     return None
@@ -65,7 +65,9 @@ def unavailable_reason():
     if not sys.platform.startswith("linux"):
         return "узел не на Linux (gateway работает только на Linux)"
     if xray_path() is None:
-        return "бинарник xray не найден — пересобери образ (ставится по умолчанию, если не INSTALL_ZAPRET=0)"
+        if zapret._env_true("ZAPRET_ENABLE_APPLY"):
+            return "xray доустанавливается в фоне (скачивается с GitHub) — обнови через ~1 мин"
+        return "xray не найден — задай ZAPRET=true в .env (узел сам доустановит на старте) и перезапусти"
     if not zapret._env_true("ZAPRET_ENABLE_APPLY"):
         return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
     return ""

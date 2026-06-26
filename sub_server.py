@@ -36,6 +36,7 @@ import secretbox
 import webui
 import zapret
 import gateway
+import provision
 
 # ── окружение ──────────────────────────────────────────────────────────────
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
@@ -781,14 +782,25 @@ def _serve(handler_cls, port, name):
     httpd.serve_forever()
 
 
+def _start_gateway_boot():
+    """В фоне (чтобы не блокировать старт веб-сервера/healthcheck скачиванием ~30МБ):
+    при ZAPRET=true доустановить nfqws/xray, если их нет в образе (важно для сборок
+    через Coolify/Nixpacks, где наш Dockerfile может не выполняться), затем поднять gateway."""
+    def _run():
+        try:
+            if zapret._env_true("ZAPRET_ENABLE_APPLY"):
+                provision.ensure_all(lambda m: print(m, flush=True))
+            gateway.reconcile(STORE)
+        except Exception as e:
+            print(f"[gateway] boot: {e}", flush=True)
+    threading.Thread(target=_run, daemon=True, name="gateway-boot").start()
+
+
 def main():
     graph.migrate_config(STORE)
     seed_legacy_route()
     CLUSTER.start()
-    try:
-        gateway.reconcile(STORE)   # серверный gateway: поднять xray/nfqws из стора на старте
-    except Exception as e:
-        print(f"[gateway] reconcile на старте: {e}", flush=True)
+    _start_gateway_boot()
 
     if ADMIN_PASSWORD in ("", "admin"):
         if os.environ.get("ALLOW_WEAK_ADMIN_PASSWORD") == "1":

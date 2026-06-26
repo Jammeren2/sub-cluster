@@ -186,10 +186,22 @@ def nfqws_path():
                  "/opt/zapret/binaries/linux-aarch64/nfqws",
                  "/opt/zapret/binaries/linux-arm/nfqws",
                  "/opt/zapret/nfqws", "/opt/zapret/bin/nfqws",
+                 "/data/zapret/binaries/linux-x86_64/nfqws",   # рантайм-доустановка (provision.py)
+                 "/data/zapret/binaries/linux-aarch64/nfqws",
+                 "/data/zapret/nfqws",
                  "/usr/local/bin/nfqws", "/usr/bin/nfqws"):
         if os.path.exists(cand):
             return cand
     return None
+
+
+def refresh_defaults():
+    """Пересобрать наборы стратегий (после рантайм-доустановки zapret, когда
+    ZAPRET_FAKE_DIR мог измениться на /data/zapret/files/fake)."""
+    global ZAPRET_FAKE_DIR, DEFAULT_STRATEGIES, COMMUNITY_STRATEGIES
+    ZAPRET_FAKE_DIR = (os.environ.get("ZAPRET_FAKE_DIR") or "/opt/zapret/files/fake").rstrip("/")
+    DEFAULT_STRATEGIES = _default_strategies()
+    COMMUNITY_STRATEGIES = _community_strategies()
 
 
 def is_available():
@@ -214,8 +226,11 @@ def unavailable_reason():
     if not sys.platform.startswith("linux"):
         return "узел не на Linux (nfqws работает только на Linux)"
     if nfqws_path() is None:
-        return ("бинарник nfqws не найден — пересобери образ (docker compose up -d --build); "
-                "nfqws ставится по умолчанию (если не задан INSTALL_ZAPRET=0)")
+        if _env_true("ZAPRET_ENABLE_APPLY"):
+            return ("nfqws доустанавливается в фоне (скачивается с GitHub) — обнови страницу "
+                    "через ~1 мин; если не появилось, смотри логи контейнера")
+        return ("nfqws не найден — задай ZAPRET=true в .env (узел сам доустановит nfqws/xray "
+                "на старте) и перезапусти контейнер")
     if not _env_true("ZAPRET_ENABLE_APPLY"):
         return "применение выключено — задай ZAPRET=true в .env (cap_add уже в docker-compose)"
     return ""

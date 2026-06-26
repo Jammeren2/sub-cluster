@@ -623,9 +623,8 @@ def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", d
     }
     why = f' <b>Причина:</b> {esc(reason)}' if reason else ''
     if not available:
-        banner = ('<div class="flash err">zapret недоступен на этом узле — авто-тест покажет ТОЛЬКО базовую '
-                  'доступность сервисов <b>без обхода</b>.' + why + ' nfqws/xray ставятся в образ по умолчанию — '
-                  'обычно достаточно <b>пересобрать</b>: <span class="mono">docker compose up -d --build</span>.</div>')
+        banner = ('<div class="flash err">zapret недоступен — авто-тест покажет ТОЛЬКО базовую '
+                  'доступность сервисов <b>без обхода</b>.' + why + '</div>')
     elif not can_apply:
         banner = ('<div class="flash">zapret найден, но применение обхода выключено — задай '
                   '<span class="mono">ZAPRET=true</span> в .env, чтобы авто-тест реально применял стратегии.'

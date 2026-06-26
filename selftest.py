@@ -1179,6 +1179,24 @@ def t_zapret_store():
     check("active_id коэрцится в строку", z2["active_id"] == "123", z2)
 
 
+def t_provision_safety():
+    print("\n[48a] provision: sha-пины + безопасная распаковка (strip + анти-traversal)")
+    import provision, io as _io, tarfile as _tf
+    check("sha-пин zapret есть", bool(provision._SHA.get(provision.ZAPRET_VERSION)))
+    check("sha-пин xray есть", bool(provision._SHA.get(provision.XRAY_VERSION)))
+    buf = _io.BytesIO()
+    with _tf.open(fileobj=buf, mode="w:gz") as tf:
+        for name in ("top/binaries/linux-x86_64/nfqws", "top/files/fake/x.bin",
+                     "top/../evil", "top/a/../../escape"):
+            ti = _tf.TarInfo(name); ti.size = 1
+            tf.addfile(ti, _io.BytesIO(b"x"))
+    buf.seek(0)
+    with _tf.open(fileobj=buf, mode="r:gz") as tf:
+        names = [m.name for m in provision._safe_tar_members(tf, 1)]
+    check("strip верхнего каталога", "binaries/linux-x86_64/nfqws" in names and "files/fake/x.bin" in names, names)
+    check("path-traversal отброшен", not any(".." in n.split("/") for n in names), names)
+
+
 def t_zapret_defaults():
     print("\n[48b] zapret.DEFAULT_STRATEGIES: набор по умолчанию валиден")
     ds = zapret.DEFAULT_STRATEGIES
@@ -1550,7 +1568,7 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_autoselect_emit, t_autoselect_nonconvertible, t_autoselect_resolve_save,
           t_autoselect_edges, t_route_into_proc_resolve,
           t_zapret_validate, t_zapret_baseline, t_zapret_autotest_best,
-          t_zapret_runstate, t_zapret_store, t_zapret_defaults, t_zapret_no_run_collision,
+          t_zapret_runstate, t_zapret_store, t_provision_safety, t_zapret_defaults, t_zapret_no_run_collision,
           t_router_config_shape, t_gateway_config, t_gateway_resolve, t_router_custom_domain_ip, t_router_default_target,
           t_router_missing_and_unknown, t_router_group_and_auto_targets, t_router_resolve_save,
           t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety):
