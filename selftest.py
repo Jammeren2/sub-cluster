@@ -1552,6 +1552,48 @@ def t_router_sync_safety():
           bool(cfg.get("node_meta", {}).get("rt000000", {}).get("router")))
 
 
+def t_clash_compatibility():
+    print("\n[60] Koala Clash / mihomo: автоформат + YAML без регрессии Happ")
+    check("Koala Clash определяется по UA",
+          subs.select_output_format("/s/sub", "Koala Clash/1.3.1") == "clash")
+    check("Clash Verge определяется по UA",
+          subs.select_output_format("/s/sub", "clash-verge/v2") == "clash")
+    check("неизвестный клиент сохраняет legacy",
+          subs.select_output_format("/s/sub", "Happ/2.16") == "legacy")
+    check("format=clash форсирует YAML",
+          subs.select_output_format("/s/sub?format=clash", "Happ/2.16") == "clash")
+    check("format=happ сильнее Clash UA",
+          subs.select_output_format("/s/sub?format=happ", "Koala Clash/1.3.1") == "legacy")
+
+    route = {"id": "r", "title": "My VPN", "mode": "merge", "upstreams": []}
+    spec = {"subs": [], "keys": [
+        {"link": "vless://11111111-1111-1111-1111-111111111111@v.example:443?security=reality&type=tcp&pbk=pub&sid=ab&fp=chrome&sni=sni.example#VLESS", "name": "VLESS"},
+        {"link": "hysteria2://secret@hy.example:443?sni=hy.example#HY2", "name": "HY2"},
+        {"link": "tuic://22222222-2222-2222-2222-222222222222:pass@tuic.example:443?sni=tuic.example#TUIC", "name": "TUIC"},
+    ], "groups": [], "routers": []}
+    legacy_body, legacy_headers = subs.build_route_response(route, spec)
+    again_body, again_headers = subs.build_route_response(route, spec, output_format="legacy")
+    check("явный legacy байт-в-байт совпадает", legacy_body == again_body)
+    check("legacy Content-Type не изменён", legacy_headers == again_headers)
+
+    yaml_body, yaml_headers = subs.build_route_response(route, spec, output_format="clash")
+    yaml_text = yaml_body.decode("utf-8")
+    check("Clash Content-Type = YAML", "application/yaml" in yaml_headers.get("Content-Type", ""))
+    check("YAML содержит обязательные секции",
+          all(f"{key}:" in yaml_text for key in ("proxies", "proxy-groups", "rules")))
+    proxy_rows = [json.loads(line[4:]) for line in yaml_text.splitlines()
+                  if line.startswith("  - {") and '"type"' in line and '"server"' in line]
+    check("VLESS/Hysteria2/TUIC сконвертированы",
+          {p.get("type") for p in proxy_rows} == {"vless", "hysteria2", "tuic"}, proxy_rows)
+    vless = next(p for p in proxy_rows if p.get("type") == "vless")
+    check("VLESS Reality перенесён", vless.get("reality-opts") == {"public-key": "pub", "short-id": "ab"})
+
+    native = b"proxies:\n  - {name: direct, type: direct}\nrules:\n  - MATCH,DIRECT\n"
+    mirrored, mh = subs.build_clash_response(native, {"Content-Type": "text/plain"})
+    check("готовый Clash YAML зеркалируется байт-в-байт", mirrored == native)
+    check("зеркалу выставлен YAML Content-Type", "application/yaml" in mh.get("Content-Type", ""))
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
@@ -1571,7 +1613,8 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_zapret_runstate, t_zapret_store, t_provision_safety, t_zapret_defaults, t_zapret_no_run_collision,
           t_router_config_shape, t_gateway_config, t_gateway_resolve, t_router_custom_domain_ip, t_router_default_target,
           t_router_missing_and_unknown, t_router_group_and_auto_targets, t_router_resolve_save,
-          t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety):
+          t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety,
+          t_clash_compatibility):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")

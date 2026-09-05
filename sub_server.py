@@ -736,7 +736,10 @@ class SubHandler(_Base):
             spec = graph.resolve_links_spec(STORE, route)
             announce = route.get("announce", "")
             try:
-                body, headers = subs.build_route_response(route, spec, announce)
+                output_format = subs.select_output_format(
+                    self.path, self.headers.get("User-Agent", ""), self.headers.get("Accept", ""))
+                body, headers = subs.build_route_response(
+                    route, spec, announce, output_format=output_format)
             except urllib.error.HTTPError as e:
                 self._respond(502, f"upstream HTTP {e.code}".encode())
             except Exception as e:

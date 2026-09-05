@@ -1063,7 +1063,255 @@ def build_merged_response(route, spec, announce=""):
     return payload, out_headers
 
 
-def build_route_response(route, spec=None, announce=""):
+_CLASH_UA_MARKERS = (
+    "koala clash", "koala-clash", "koalaclash",
+    "clash-verge", "clash verge", "clash.meta", "clashmeta",
+    "mihomo", "clash for windows", "clashforwindows", "clashx",
+    "clash/", "stash/",
+)
+
+
+def select_output_format(request_target="", user_agent="", accept=""):
+    """Choose the wire format without changing the historical Happ response.
+
+    An explicit ``?format=clash`` is useful for clients that hide or spoof their
+    User-Agent.  Known Clash/mihomo clients are detected automatically.  Every
+    other client keeps receiving the byte-for-byte legacy format.
+    """
+    query = urllib.parse.urlsplit(request_target or "").query
+    requested = (urllib.parse.parse_qs(query).get("format", [""])[0] or "").strip().lower()
+    if requested in ("clash", "clash-meta", "meta", "mihomo", "koala", "yaml", "yml"):
+        return "clash"
+    if requested in ("happ", "xray", "base64", "raw", "legacy"):
+        return "legacy"
+    ua = (user_agent or "").lower()
+    if any(marker in ua for marker in _CLASH_UA_MARKERS):
+        return "clash"
+    accepted = (accept or "").lower()
+    if "application/yaml" in accepted or "application/x-yaml" in accepted:
+        return "clash"
+    return "legacy"
+
+
+def _clash_transport(proxy, stream):
+    """Copy Xray transport/TLS settings into their mihomo equivalents."""
+    stream = stream if isinstance(stream, dict) else {}
+    network = str(stream.get("network") or "tcp").lower()
+    security = str(stream.get("security") or "none").lower()
+    proxy["udp"] = True
+    if security in ("tls", "xtls", "reality"):
+        proxy["tls"] = True
+        tls = stream.get("realitySettings") if security == "reality" else stream.get("tlsSettings")
+        tls = tls if isinstance(tls, dict) else {}
+        servername = tls.get("serverName") or tls.get("serverNameToVerify")
+        if servername:
+            proxy["servername"] = servername
+        fingerprint = tls.get("fingerprint")
+        if fingerprint:
+            proxy["client-fingerprint"] = fingerprint
+        if tls.get("allowInsecure"):
+            proxy["skip-cert-verify"] = True
+        if security == "reality":
+            reality = {}
+            if tls.get("publicKey"):
+                reality["public-key"] = tls["publicKey"]
+            if tls.get("shortId"):
+                reality["short-id"] = tls["shortId"]
+            if reality:
+                proxy["reality-opts"] = reality
+    if network == "ws":
+        ws = stream.get("wsSettings") if isinstance(stream.get("wsSettings"), dict) else {}
+        proxy["network"] = "ws"
+        opts = {"path": ws.get("path") or "/"}
+        headers = ws.get("headers")
+        if isinstance(headers, dict) and any(str(v) for v in headers.values()):
+            opts["headers"] = headers
+        proxy["ws-opts"] = opts
+    elif network == "grpc":
+        grpc = stream.get("grpcSettings") if isinstance(stream.get("grpcSettings"), dict) else {}
+        proxy["network"] = "grpc"
+        proxy["grpc-opts"] = {"grpc-service-name": grpc.get("serviceName") or ""}
+    elif network in ("http", "h2"):
+        http = stream.get("httpSettings") if isinstance(stream.get("httpSettings"), dict) else {}
+        proxy["network"] = "h2"
+        proxy["h2-opts"] = {"path": http.get("path") or "/", "host": http.get("host") or []}
+
+
+def _xray_outbound_to_clash(outbound, name):
+    """Convert the common Xray outbounds emitted/accepted by this project."""
+    if not isinstance(outbound, dict):
+        return None
+    protocol = str(outbound.get("protocol") or "").lower()
+    settings = outbound.get("settings") if isinstance(outbound.get("settings"), dict) else {}
+    stream = outbound.get("streamSettings")
+    try:
+        if protocol in ("vless", "vmess"):
+            vnext = settings["vnext"][0]
+            user = vnext["users"][0]
+            proxy = {"name": name, "type": protocol, "server": vnext["address"],
+                     "port": int(vnext["port"]), "uuid": user["id"]}
+            if protocol == "vless":
+                proxy["flow"] = user.get("flow") or ""
+                proxy["encryption"] = user.get("encryption") or ""
+            else:
+                proxy["alterId"] = int(user.get("alterId") or 0)
+                proxy["cipher"] = user.get("security") or "auto"
+            _clash_transport(proxy, stream)
+            return proxy
+        if protocol == "trojan":
+            server = settings["servers"][0]
+            proxy = {"name": name, "type": "trojan", "server": server["address"],
+                     "port": int(server["port"]), "password": server["password"]}
+            _clash_transport(proxy, stream)
+            return proxy
+        if protocol in ("shadowsocks", "ss"):
+            server = settings["servers"][0]
+            return {"name": name, "type": "ss", "server": server["address"],
+                    "port": int(server["port"]), "cipher": server["method"],
+                    "password": server["password"], "udp": True}
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _share_link_to_clash(link, name):
+    outbound, parsed_name = _link_to_outbound(link)
+    if outbound:
+        return _xray_outbound_to_clash(outbound, name or parsed_name or "Proxy")
+    try:
+        u = urllib.parse.urlsplit(link)
+        q = urllib.parse.parse_qs(u.query)
+        one = lambda key, default="": q.get(key, [default])[0]
+        scheme = u.scheme.lower()
+        if scheme in ("hysteria2", "hy2") and u.hostname:
+            proxy = {"name": name or urllib.parse.unquote(u.fragment) or u.hostname,
+                     "type": "hysteria2", "server": u.hostname, "port": u.port or 443,
+                     "password": urllib.parse.unquote(u.username or "")}
+            if one("sni") or one("peer"):
+                proxy["sni"] = one("sni") or one("peer")
+            if one("insecure") in ("1", "true"):
+                proxy["skip-cert-verify"] = True
+            if one("obfs"):
+                proxy["obfs"] = one("obfs")
+            if one("obfs-password") or one("obfsParam"):
+                proxy["obfs-password"] = one("obfs-password") or one("obfsParam")
+            return proxy
+        if scheme == "tuic" and u.hostname:
+            proxy = {"name": name or urllib.parse.unquote(u.fragment) or u.hostname,
+                     "type": "tuic", "server": u.hostname, "port": u.port or 443,
+                     "uuid": urllib.parse.unquote(u.username or ""),
+                     "password": urllib.parse.unquote(u.password or "")}
+            if one("sni"):
+                proxy["sni"] = one("sni")
+            if one("congestion_control") or one("congestion-controller"):
+                proxy["congestion-controller"] = one("congestion_control") or one("congestion-controller")
+            proxy["udp-relay-mode"] = one("udp_relay_mode") or "native"
+            return proxy
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _unique_clash_name(preferred, used):
+    base = str(preferred or "Proxy").strip() or "Proxy"
+    candidate, n = base, 2
+    while candidate in used:
+        candidate = f"{base} #{n}"
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
+def _render_clash_yaml(proxies, groups, rules):
+    """Emit dependency-free YAML; JSON flow mappings are valid YAML 1.2."""
+    compact = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    lines = ["# Generated by sub-cluster for Clash/mihomo clients",
+             "mixed-port: 7890", "allow-lan: false", "mode: rule",
+             "log-level: info", "ipv6: false"]
+    lines.append("proxies:" if proxies else "proxies: []")
+    lines.extend("  - " + compact(proxy) for proxy in proxies)
+    lines.append("proxy-groups:" if groups else "proxy-groups: []")
+    lines.extend("  - " + compact(group) for group in groups)
+    lines.append("rules:" if rules else "rules: []")
+    lines.extend("  - " + compact(rule) for rule in rules)
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def build_clash_response(body, headers, title=""):
+    """Convert a legacy Happ/base64 response to one runnable mihomo profile."""
+    text = body.decode("utf-8", errors="ignore").lstrip("\ufeff\r\n \t")
+    # A mirror may already be a native Clash subscription. Preserve its rules verbatim.
+    if re.search(r"(?m)^\s*proxies\s*:", text) and re.search(r"(?m)^\s*(proxy-groups|rules)\s*:", text):
+        out_headers = dict(headers or {})
+        out_headers["Content-Type"] = "application/yaml; charset=utf-8"
+        return body, out_headers
+
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        parsed = None
+    configs = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else [])
+    proxies, groups, profile_targets, used = [], [], [], set()
+
+    for index, cfg in enumerate(configs, 1):
+        if not isinstance(cfg, dict):
+            continue
+        base = str(cfg.get("remarks") or f"Profile {index}")
+        converted = []
+        candidates = [ob for ob in (cfg.get("outbounds") or [])
+                      if isinstance(ob, dict) and ob.get("protocol") not in ("freedom", "blackhole", "loopback", "dns")]
+        for ob in candidates:
+            raw_name = base if len(candidates) == 1 else f"{base} · {ob.get('tag') or len(converted) + 1}"
+            proxy_name = _unique_clash_name(raw_name, used)
+            proxy = _xray_outbound_to_clash(ob, proxy_name)
+            if proxy:
+                proxies.append(proxy)
+                converted.append(proxy_name)
+            else:
+                used.discard(proxy_name)
+        if not converted:
+            continue
+        if len(converted) == 1:
+            profile_targets.append(converted[0])
+        else:
+            group_name = _unique_clash_name(base, used)
+            auto = bool(((cfg.get("routing") or {}).get("balancers") or []))
+            group = {"name": group_name, "type": "url-test" if auto else "select", "proxies": converted}
+            if auto:
+                group.update({"url": "http://www.gstatic.com/generate_204", "interval": 300})
+            groups.append(group)
+            profile_targets.append(group_name)
+
+    if not configs:
+        for index, link in enumerate(extract_links(body), 1):
+            raw_name = _frag_name(link) or f"Proxy {index}"
+            proxy_name = _unique_clash_name(raw_name, used)
+            proxy = _share_link_to_clash(link, proxy_name)
+            if proxy:
+                proxies.append(proxy)
+                profile_targets.append(proxy_name)
+            else:
+                used.discard(proxy_name)
+
+    proxy_names = [proxy["name"] for proxy in proxies]
+    if proxy_names:
+        auto_name = _unique_clash_name("♻️ Auto", used)
+        groups.append({"name": auto_name, "type": "url-test", "proxies": proxy_names,
+                       "url": "http://www.gstatic.com/generate_204", "interval": 300})
+        main_name = _unique_clash_name(title or "🚀 Proxy", used)
+        choices = _dedup(profile_targets + [auto_name, "DIRECT"])
+        groups.append({"name": main_name, "type": "select", "proxies": choices})
+        rules = [f"MATCH,{main_name}"]
+    else:
+        rules = ["MATCH,DIRECT"]
+
+    out_headers = dict(headers or {})
+    out_headers["Content-Type"] = "application/yaml; charset=utf-8"
+    out_headers["Content-Disposition"] = "attachment; filename=subscription.yaml"
+    return _render_clash_yaml(proxies, groups, rules), out_headers
+
+
+def build_route_response(route, spec=None, announce="", output_format="legacy"):
     """spec — разрешённый (транзитивный) набор: {"subs":[{"url","renames"}],
     "keys":[{"link","name"}]}. announce — текст под подпиской (заголовок Announce).
     Если spec=None — строим вырожденный spec из route['upstreams'] (совместимость)."""
@@ -1077,8 +1325,12 @@ def build_route_response(route, spec=None, announce=""):
     has_renames = any((s.get("renames") for s in subs))
     # Зеркало байт-в-байт возможно только без ключей/групп/роутеров/переименований и с одной подпиской.
     if mode == "mirror" and len(subs) == 1 and not keys and not groups and not routers and not has_renames:
-        return build_mirror_response(route, subs[0]["url"], announce)
-    return build_merged_response(route, spec, announce)
+        body, headers = build_mirror_response(route, subs[0]["url"], announce)
+    else:
+        body, headers = build_merged_response(route, spec, announce)
+    if output_format == "clash":
+        return build_clash_response(body, headers, route.get("title") or "")
+    return body, headers
 
 
 def preview_subscription(url, limit=1000):
