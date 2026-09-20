@@ -22,7 +22,9 @@ from urllib.parse import quote as _urlquote, urlencode as _urlencode
 import urllib.parse
 
 UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "20"))
-CACHE_TTL = int(os.environ.get("CACHE_TTL", "60"))
+# Не позволяем старому .env с CACHE_TTL=60 снова устроить шквал запросов после обновления.
+# Значение можно увеличить, но не уменьшить ниже трёх часов.
+CACHE_TTL = max(10800, int(os.environ.get("CACHE_TTL", "10800")))
 
 # HWID/device — НЕ хардкодим реальный отпечаток. По умолчанию генерируем случайный
 # (стабильный в пределах запуска); для стабильности между рестартами задай HAPP_HWID.
@@ -183,6 +185,7 @@ def _aggregate_userinfo(infos):
 # ── кэш upstream ──────────────────────────────────────────────────────────
 _cache_lock = threading.Lock()
 _cache = {}
+_cache_inflight = {}
 
 
 def fetch_upstream(url):
@@ -201,15 +204,50 @@ def fetch_upstream(url):
 
 
 def fetch_upstream_cached(url):
-    now = time.time()
-    with _cache_lock:
-        entry = _cache.get(url)
-        if entry and (now - entry["ts"]) < CACHE_TTL:
-            return entry["body"], entry["headers"]
-    body, headers = fetch_upstream(url)
-    with _cache_lock:
-        _cache[url] = {"ts": time.time(), "body": body, "headers": headers}
-    return body, headers
+    """Общий кэш upstream + single-flight на URL.
+
+    Даже если сотни клиентов одновременно обновятся после истечения TTL, к VPN-
+    провайдеру уйдёт один запрос; остальные дождутся его результата из кэша.
+    """
+    while True:
+        now = time.time()
+        with _cache_lock:
+            entry = _cache.get(url)
+            if entry and (now - entry["ts"]) < CACHE_TTL:
+                if entry.get("error") is not None:
+                    raise entry["error"]
+                return entry["body"], entry["headers"]
+            event = _cache_inflight.get(url)
+            if event is None:
+                event = _cache_inflight[url] = threading.Event()
+                owner = True
+            else:
+                owner = False
+        if owner:
+            try:
+                body, headers = fetch_upstream(url)
+                with _cache_lock:
+                    _cache[url] = {"ts": time.time(), "body": body, "headers": headers}
+                return body, headers
+            except Exception as exc:
+                with _cache_lock:
+                    stale = _cache.get(url)
+                    if stale and stale.get("body") is not None:
+                        # Провайдер временно недоступен: не роняем подписки и не
+                        # повторяем запрос для каждого клиента — продлеваем stale.
+                        stale["ts"] = time.time()
+                        return stale["body"], stale["headers"]
+                    # На холодном старте также запоминаем ошибку на TTL: один сбой
+                    # не превращается в сотни одинаковых запросов от клиентов.
+                    _cache[url] = {"ts": time.time(), "error": exc}
+                raise
+            finally:
+                with _cache_lock:
+                    _cache_inflight.pop(url, None)
+                    event.set()
+        # У владельца сетевой таймаут ограничен UPSTREAM_TIMEOUT. После его ошибки
+        # ожидающий сам станет владельцем и попробует снова; вечного ожидания нет.
+        event.wait(UPSTREAM_TIMEOUT + 5)
 
 
 def _b64_header(text):

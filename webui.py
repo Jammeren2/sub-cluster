@@ -561,9 +561,11 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
 
 
 # ── статистика ─────────────────────────────────────────────────────────────
-def render_stats(stats, routes, node_id, sub_base):
+def render_stats(stats, routes, node_id, sub_base, blocked_devices=None, csrf=""):
     title_by_id = {r.get("id"): (r.get("title") or r.get("path") or r.get("id")) for r in routes}
     path_by_id = {r.get("id"): r.get("path", "") for r in routes}
+    blocked = {(str(x.get("route_id") or ""), str(x.get("device") or ""))
+               for x in (blocked_devices or []) if isinstance(x, dict)}
     blocks = []
     # маршруты с трафиком — по числу запросов
     items = sorted(stats.items(), key=lambda kv: kv[1].get("requests", 0), reverse=True)
@@ -574,12 +576,26 @@ def render_stats(stats, routes, node_id, sub_base):
         for d in st.get("devices", []):
             label = esc(d.get("hwid") or d.get("device") or "—")
             nodes = esc(", ".join(d.get("nodes", []))) or "—"
+            device = str(d.get("device") or "")
+            is_blocked = (str(rid), device) in blocked
+            action = "unblock" if is_blocked else "block"
+            button = "Разблокировать" if is_blocked else "Заблокировать"
+            badge = '<span class="badge" style="background:#3b1d22;color:#ff9b9b">заблокирован</span>' if is_blocked else ""
+            warn = " (по IP)" if device.startswith("ip:") else ""
             rows.append(
-                f'<tr><td><span class="mono">{label[:20]}</span></td>'
+                f'<tr><td><span class="mono">{label[:20]}</span>{badge}</td>'
                 f'<td>{esc(d.get("model") or "—")}</td><td>{esc(d.get("app") or "—")}</td>'
                 f'<td class="mono">{esc(d.get("ip") or "—")}</td><td>{esc(d.get("cnt"))}</td>'
                 f'<td class="muted">{nodes}</td>'
-                f'<td class="muted">{esc(_ago(d.get("last_ts")))}</td></tr>')
+                f'<td class="muted">{esc(_ago(d.get("last_ts")))}</td>'
+                f'<td><form class="inline" method="post" action="/stats/block">'
+                f'<input type="hidden" name="route" value="{esc(rid)}">'
+                f'<input type="hidden" name="device" value="{esc(device)}">'
+                f'<input type="hidden" name="action" value="{action}">'
+                f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+                f'<button class="btn small {"gray" if is_blocked else "ghost"}" type="submit" '
+                f'onclick="return confirm(\'{button} устройство{warn}?\')">{button}</button>'
+                f'</form></td></tr>')
         blocks.append(
             f'<div class="card"><div class="route-head"><div>'
             f'<div class="route-title">{name or "(без названия)"}</div>'
@@ -587,7 +603,7 @@ def render_stats(stats, routes, node_id, sub_base):
             f'<div style="text-align:right"><div class="route-title">{esc(st.get("requests",0))}</div>'
             f'<div class="muted">запросов · устройств: {len(st.get("devices",[]))}</div></div></div>'
             f'<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Устройства</summary>'
-            f'<table class="tbl" style="margin-top:8px"><thead><tr><th>HWID</th><th>Модель</th><th>Клиент</th><th>IP</th><th>Запр.</th><th>Узлы</th><th>Активность</th></tr></thead>'
+            f'<table class="tbl" style="margin-top:8px"><thead><tr><th>HWID</th><th>Модель</th><th>Клиент</th><th>IP</th><th>Запр.</th><th>Узлы</th><th>Активность</th><th>Доступ</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></details>'
             f'<form class="inline" method="post" action="/stats/reset" style="margin-top:8px">'
             f'<input type="hidden" name="route" value="{esc(rid)}">'
@@ -602,7 +618,9 @@ def render_stats(stats, routes, node_id, sub_base):
 <div class="muted" style="margin-bottom:12px">Сводно по <b>всему кластеру</b>: запросы клиентов
 к подпискам со всех живых узлов (опрашиваются на лету). Столбец «Узлы» — на каких узлах
 видели устройство. Этот узел: <b>{esc(node_id)}</b>. Сброс рассылается на все живые
-узлы (узел, который сейчас офлайн, обнулится только когда вернётся — вручную).
+  узлы (узел, который сейчас офлайн, обнулится только когда вернётся — вручную).
+  Блокировка действует на устройство только в выбранной подписке и синхронизируется по
+  кластеру. Если HWID отсутствует, используется IP — за общим IP могут находиться другие люди.
 <button class="btn small gray" onclick="document.body.classList.toggle('unblur')">Показать/скрыть пути</button></div>
 {body}
 <form class="inline" method="post" action="/stats/reset" style="margin-top:8px">

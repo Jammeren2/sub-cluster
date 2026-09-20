@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
     "routes": [],
     "sources": [],
     "edges": [],
+    # Ручные блокировки подписок. Синхронизируются как часть config по кластеру.
+    # device = X-Hwid, а для клиентов без HWID — "ip:<адрес>".
+    "blocked_devices": [],
     "settings": {
         "failover_enabled": True,
         "require_quorum": True,   # авто-захват мёртвого активного — только при кворуме
@@ -407,7 +410,7 @@ class Store:
         model = (model or "")[:64]
         app = (app or "")[:64]
         ip = (ip or "")[:64]
-        device = (hwid.strip() or ("ip:" + (ip or "?")))[:128]
+        device = self.device_key(hwid, ip)
         now = time.time()
         with self._lock:
             self._conn.execute(
@@ -424,6 +427,58 @@ class Store:
                 (route_id, route_id, max_per_route),
             )
             self._conn.commit()
+
+    @staticmethod
+    def device_key(hwid, ip):
+        """Та же идентичность, что используется статистикой и блокировкой."""
+        return ((hwid or "").strip() or ("ip:" + (ip or "?")))[:128]
+
+    def get_blocked_devices(self):
+        cfg = self.get_config() or {}
+        rows = cfg.get("blocked_devices")
+        if not isinstance(rows, list):
+            return []
+        out = []
+        for row in rows[:5000]:
+            if not isinstance(row, dict):
+                continue
+            route_id = str(row.get("route_id") or "")[:64]
+            device = str(row.get("device") or "")[:128]
+            if route_id and device:
+                try:
+                    blocked_at = float(row.get("blocked_at") or 0)
+                except (TypeError, ValueError):
+                    blocked_at = 0.0
+                out.append({"route_id": route_id, "device": device,
+                            "blocked_at": blocked_at})
+        return out
+
+    def is_device_blocked(self, route_id, hwid="", ip="", device=None):
+        key = (device if device is not None else self.device_key(hwid, ip))[:128]
+        return any(row["route_id"] == route_id and row["device"] == key
+                   for row in self.get_blocked_devices())
+
+    def set_device_blocked(self, route_id, device, blocked=True):
+        """Заблокировать/разблокировать устройство на одном маршруте подписки."""
+        route_id = str(route_id or "")[:64]
+        device = str(device or "")[:128]
+        if not route_id or not device:
+            return False
+
+        def mut(cfg):
+            rows = cfg.get("blocked_devices")
+            if not isinstance(rows, list):
+                rows = []
+            rows = [r for r in rows if not (isinstance(r, dict)
+                    and str(r.get("route_id") or "") == route_id
+                    and str(r.get("device") or "") == device)]
+            if blocked:
+                rows.append({"route_id": route_id, "device": device,
+                             "blocked_at": time.time()})
+            cfg["blocked_devices"] = rows[-5000:]
+
+        self.update_config(mut, skip_if_unchanged=True)
+        return True
 
     def get_stats(self):
         """→ {route_id: {requests, devices:[{device,hwid,model,app,ip,cnt,last_ts,first_ts}]}}"""

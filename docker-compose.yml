@@ -51,7 +51,7 @@ services:
       SECRET_KEY: "${SECRET_KEY:-}"
       ADMIN_USER: "${ADMIN_USER:-admin}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
-      CACHE_TTL: "${CACHE_TTL:-60}"
+      CACHE_TTL: "${CACHE_TTL:-10800}"
       # Применять обход к egress (та же ZAPRET=true + cap_add ниже). off = только baseline.
       ZAPRET_ENABLE_APPLY: "${ZAPRET:-false}"
     volumes:

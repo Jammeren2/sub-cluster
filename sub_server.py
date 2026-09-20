@@ -405,7 +405,8 @@ class AdminHandler(_Base):
             self._html(200, webui.render_cluster(CLUSTER.status(), sub_public_base()))
         elif path == "/stats":
             self._html(200, webui.render_stats(CLUSTER.cluster_stats(), graph.get_routes(STORE),
-                                               CLUSTER.id, sub_public_base()))
+                                               CLUSTER.id, sub_public_base(),
+                                               STORE.get_blocked_devices(), sess["csrf"]))
         elif path == "/settings":
             s = STORE.get_settings()
             self._html(200, webui.render_settings(s, CLUSTER.all_nodes(),
@@ -605,6 +606,19 @@ class AdminHandler(_Base):
             CLUSTER.reset_stats_cluster(self._read_form().get("route", [""])[0].strip() or None)
             self._redirect("/stats")
             return
+        if path == "/stats/block":
+            f = self._read_form()
+            if not hmac.compare_digest(f.get("csrf", [""])[0], self._session().get("csrf", "")):
+                self._respond(403, "Неверный CSRF-токен")
+                return
+            route_id = f.get("route", [""])[0].strip()
+            device = f.get("device", [""])[0].strip()
+            blocked = f.get("action", ["block"])[0] != "unblock"
+            valid_route = any(r.get("id") == route_id for r in graph.get_routes(STORE))
+            if valid_route and device:
+                STORE.set_device_blocked(route_id, device, blocked)
+            self._redirect("/stats")
+            return
 
         # ── настройки ──
         if path == "/settings/save":
@@ -712,6 +726,8 @@ class AdminHandler(_Base):
 
 # ── sub-сервер (отдача подписок) ───────────────────────────────────────────
 class SubHandler(_Base):
+    BLOCKED_MESSAGE = ("Доступ к VPN заблокирован. Обратитесь в Telegram: @Jammeren2\n")
+
     def _device(self):
         ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
               or self.headers.get("X-Real-IP") or self.client_address[0])
@@ -733,6 +749,15 @@ class SubHandler(_Base):
             d = self._device()
             print(f"[{self.log_date_time_string()}] DEVICE ip={d['ip']} hwid={d['hwid'] or '-'} "
                   f"model={d['model'] or '-'} app={d['app'] or '-'} ua=\"{d['ua']}\"", flush=True)
+            if STORE.is_device_blocked(route["id"], d["hwid"], d["ip"]):
+                try:
+                    STORE.record_device(route["id"], d["hwid"], d["model"], d["app"], d["ip"])
+                except Exception:
+                    pass
+                self._respond(403, self.BLOCKED_MESSAGE,
+                              {"Content-Type": "text/plain; charset=utf-8",
+                               "Cache-Control": "no-store"})
+                return
             spec = graph.resolve_links_spec(STORE, route)
             announce = route.get("announce", "")
             try:

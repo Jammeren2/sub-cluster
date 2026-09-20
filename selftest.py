@@ -10,6 +10,8 @@ import os
 import json
 import base64
 import tempfile
+import threading
+import time
 import urllib.parse
 
 TMP = tempfile.mkdtemp(prefix="subcluster-selftest-")
@@ -55,6 +57,7 @@ def fake_fetch(url):
     return FAKE[url]
 
 
+REAL_FETCH_CACHED = subs.fetch_upstream_cached
 subs.fetch_upstream_cached = fake_fetch
 
 
@@ -1594,6 +1597,50 @@ def t_clash_compatibility():
     check("зеркалу выставлен YAML Content-Type", "application/yaml" in mh.get("Content-Type", ""))
 
 
+def t_upstream_cache_and_device_blocking():
+    print("\n[61] upstream-кэш 3 часа + блокировка устройств")
+    check("TTL по умолчанию = 3 часа", subs.CACHE_TTL == 10800, subs.CACHE_TTL)
+
+    old_fetch = subs.fetch_upstream
+    calls = []
+    gate = threading.Barrier(6)
+
+    def counted_fetch(url):
+        calls.append(url)
+        time.sleep(0.08)
+        return b"one", {"Content-Type": "text/plain"}
+
+    subs.fetch_upstream = counted_fetch
+    with subs._cache_lock:
+        subs._cache.pop("https://single-flight.test/sub", None)
+        subs._cache_inflight.pop("https://single-flight.test/sub", None)
+    results = []
+
+    def worker():
+        gate.wait()
+        results.append(REAL_FETCH_CACHED("https://single-flight.test/sub"))
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    subs.fetch_upstream = old_fetch
+    check("одновременные обновления дают один upstream-запрос", len(calls) == 1, len(calls))
+    check("все ожидающие получили ответ", len(results) == 6 and all(x[0] == b"one" for x in results))
+
+    st = new_store()
+    base_graph(st)
+    check("изначально HWID разрешён", not st.is_device_blocked("r1cccccc", "hw-1", "1.2.3.4"))
+    check("блокировка сохранилась", st.set_device_blocked("r1cccccc", "hw-1", True))
+    check("тот же HWID заблокирован", st.is_device_blocked("r1cccccc", "hw-1", "9.9.9.9"))
+    check("блокировка ограничена маршрутом", not st.is_device_blocked("other", "hw-1", "9.9.9.9"))
+    check("другой HWID разрешён", not st.is_device_blocked("r1cccccc", "hw-2", "1.2.3.4"))
+    st.set_device_blocked("r1cccccc", "hw-1", False)
+    check("разблокировка работает", not st.is_device_blocked("r1cccccc", "hw-1", "1.2.3.4"))
+    check("без HWID ключ строится по IP", st.device_key("", "1.2.3.4") == "ip:1.2.3.4")
+
+
 for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
           t_resolve, t_format, t_rename_match, t_mirror, t_preview,
@@ -1614,7 +1661,7 @@ for t in (t_sync_safety, t_classic_preserves_keys, t_id_remap, t_gc,
           t_router_config_shape, t_gateway_config, t_gateway_resolve, t_router_custom_domain_ip, t_router_default_target,
           t_router_missing_and_unknown, t_router_group_and_auto_targets, t_router_resolve_save,
           t_router_target_remap, t_router_gc_unknown_target, t_router_edges, t_router_sync_safety,
-          t_clash_compatibility):
+          t_clash_compatibility, t_upstream_cache_and_device_blocking):
     t()
 
 print(f"\n=== PASS={PASS} FAIL={FAIL} ===")
