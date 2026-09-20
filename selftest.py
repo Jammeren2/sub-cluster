@@ -1644,7 +1644,8 @@ def t_upstream_cache_and_device_blocking():
     blocked_links = links_from_b64(legacy_body)
     check("legacy-блокировка содержит одну ноду", len(blocked_links) == 1, blocked_links)
     check("legacy-нода нерабочая и подписана",
-          "@blocked.invalid:1" in blocked_links[0] and "@Jammeren2" in frag(blocked_links[0]))
+          "@blocked.invalid:1" in blocked_links[0]
+          and "Вы были заблокированы. Обратитесь в Telegram @Jammeren2" in frag(blocked_links[0]))
     check("legacy-блокировка возвращается как успешная подписка",
           "text/plain" in legacy_headers.get("Content-Type", ""))
 
@@ -1654,7 +1655,7 @@ def t_upstream_cache_and_device_blocking():
           clash_text.count('"server":"blocked.invalid"') == 1
           and "proxy-groups:" in clash_text and "rules:" in clash_text)
     check("Clash-нода подписана как заблокированная",
-          "Заблокирован" in clash_text and "@Jammeren2" in clash_text)
+          "Вы были заблокированы. Обратитесь в Telegram @Jammeren2" in clash_text)
     check("Clash-блокировка имеет YAML Content-Type",
           "application/yaml" in clash_headers.get("Content-Type", ""))
 

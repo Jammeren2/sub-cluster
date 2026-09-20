@@ -1349,7 +1349,8 @@ def build_clash_response(body, headers, title=""):
     return _render_clash_yaml(proxies, groups, rules), out_headers
 
 
-_BLOCKED_NAME = "🚫 Заблокирован — @Jammeren2"
+_BLOCKED_MESSAGE = "Вы были заблокированы. Обратитесь в Telegram @Jammeren2"
+_BLOCKED_NAME = "🚫 " + _BLOCKED_MESSAGE
 _BLOCKED_HOST = "blocked.invalid"  # зарезервированная DNS-зона, соединение невозможно
 _BLOCKED_UUID = "00000000-0000-4000-8000-000000000000"
 
@@ -1358,14 +1359,14 @@ def build_blocked_response(output_format="legacy"):
     """Валидная, но заведомо нерабочая подписка, заменяющая старые серверы клиента."""
     common_headers = {
         "Cache-Control": "no-store",
-        "Profile-Title": _b64_header("Заблокирован"),
-        "Announce": _b64_header("Доступ заблокирован. Telegram: @Jammeren2"),
+        "Profile-Title": _b64_header(_BLOCKED_MESSAGE),
+        "Announce": _b64_header(_BLOCKED_MESSAGE),
         "Subscription-Userinfo": "upload=0; download=0; total=0",
     }
     if output_format == "clash":
         proxy = {"name": _BLOCKED_NAME, "type": "vless", "server": _BLOCKED_HOST,
                  "port": 1, "uuid": _BLOCKED_UUID, "udp": False}
-        group_name = "🚫 VPN заблокирован"
+        group_name = "🚫 Вы были заблокированы — @Jammeren2"
         body = _render_clash_yaml(
             [proxy], [{"name": group_name, "type": "select", "proxies": [_BLOCKED_NAME]}],
             [f"MATCH,{group_name}"])
