@@ -1645,17 +1645,21 @@ def t_upstream_cache_and_device_blocking():
     check("legacy-блокировка содержит одну ноду", len(blocked_links) == 1, blocked_links)
     check("legacy-нода нерабочая и подписана",
           "@blocked.invalid:1" in blocked_links[0]
-          and "Вы были заблокированы. Обратитесь в Telegram @Jammeren2" in frag(blocked_links[0]))
+          and frag(blocked_links[0]) == "Заблокирован")
     check("legacy-блокировка возвращается как успешная подписка",
           "text/plain" in legacy_headers.get("Content-Type", ""))
+    blocked_message = "Вы были заблокированы. Обратитесь в Telegram @Jammeren2"
+    announce = legacy_headers.get("Announce", "").removeprefix("base64:")
+    check("полное сообщение находится в подписи подписки",
+          base64.b64decode(announce).decode("utf-8") == blocked_message)
 
     clash_body, clash_headers = subs.build_blocked_response("clash")
     clash_text = clash_body.decode("utf-8")
     check("Clash-блокировка — валидный профиль с одной нодой",
           clash_text.count('"server":"blocked.invalid"') == 1
           and "proxy-groups:" in clash_text and "rules:" in clash_text)
-    check("Clash-нода подписана как заблокированная",
-          "Вы были заблокированы. Обратитесь в Telegram @Jammeren2" in clash_text)
+    check("Clash-нода называется только «Заблокирован»",
+          '"name":"Заблокирован"' in clash_text and blocked_message not in clash_text)
     check("Clash-блокировка имеет YAML Content-Type",
           "application/yaml" in clash_headers.get("Content-Type", ""))
 
