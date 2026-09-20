@@ -726,8 +726,6 @@ class AdminHandler(_Base):
 
 # ── sub-сервер (отдача подписок) ───────────────────────────────────────────
 class SubHandler(_Base):
-    BLOCKED_MESSAGE = ("Доступ к VPN заблокирован. Обратитесь в Telegram: @Jammeren2\n")
-
     def _device(self):
         ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
               or self.headers.get("X-Real-IP") or self.client_address[0])
@@ -749,20 +747,19 @@ class SubHandler(_Base):
             d = self._device()
             print(f"[{self.log_date_time_string()}] DEVICE ip={d['ip']} hwid={d['hwid'] or '-'} "
                   f"model={d['model'] or '-'} app={d['app'] or '-'} ua=\"{d['ua']}\"", flush=True)
+            output_format = subs.select_output_format(
+                self.path, self.headers.get("User-Agent", ""), self.headers.get("Accept", ""))
             if STORE.is_device_blocked(route["id"], d["hwid"], d["ip"]):
                 try:
                     STORE.record_device(route["id"], d["hwid"], d["model"], d["app"], d["ip"])
                 except Exception:
                     pass
-                self._respond(403, self.BLOCKED_MESSAGE,
-                              {"Content-Type": "text/plain; charset=utf-8",
-                               "Cache-Control": "no-store"})
+                body, headers = subs.build_blocked_response(output_format)
+                self._respond(200, body, headers)
                 return
             spec = graph.resolve_links_spec(STORE, route)
             announce = route.get("announce", "")
             try:
-                output_format = subs.select_output_format(
-                    self.path, self.headers.get("User-Agent", ""), self.headers.get("Accept", ""))
                 body, headers = subs.build_route_response(
                     route, spec, announce, output_format=output_format)
             except urllib.error.HTTPError as e:
