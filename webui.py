@@ -276,9 +276,8 @@ def render_editor(graph, sub_base, csrf, banner="", domains=None):
 <title>Граф — Sub Cluster</title><style>{EDITOR_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
 <body class="editor-page">
 {nav_links("/")}
-<header class="editor-heading"><div><div class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</div><h1>Редактор подписок</h1></div><span class="editor-description">Соединяйте источники. Создавайте маршруты.</span></header>
 <div id="top" role="toolbar" aria-label="Инструменты графа">
-  <div class="tool-group tool-create"><span class="tool-label">Добавить</span>
+  <div class="tool-group tool-create" role="group" aria-label="Добавить ноду">
   <button class="btn" id="addSrc">+ Источник</button>
   <button class="btn" id="addKey">+ Ключ</button>
   <button class="btn" id="addGroup">+ Группа</button>
