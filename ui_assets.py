@@ -66,3 +66,8 @@ form.inline { display:inline; }
 .blur.show { filter:none; }
 body.unblur .blur { filter:none; cursor:auto; }
 """
+
+
+# Shared application shell, loaded once with the editor assets.
+SHELL_CSS = _read("shell.css")
+SHELL_JS = _read("shell.js")

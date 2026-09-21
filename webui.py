@@ -13,7 +13,7 @@ import json
 import time
 
 import subscriptions
-from ui_assets import EDITOR_CSS, EDITOR_JS, PAGE_CSS
+from ui_assets import EDITOR_CSS, EDITOR_JS, PAGE_CSS, SHELL_CSS, SHELL_JS
 
 
 def esc(s):
@@ -33,14 +33,54 @@ NAV_ITEMS = [("/", "Граф"), ("/classic", "Список"), ("/cluster", "Кл
              ("/stats", "Статистика"), ("/zapret", "zapret"), ("/settings", "Настройки")]
 
 
+NAV_ICONS = {
+    "/": '<rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="15" width="6" height="6" rx="1.5"/><path d="M6 9v9h9M9 6h9v9"/>',
+    "/classic": '<path d="M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1"/>',
+    "/cluster": '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M16 6.5h2M16 17.5h2"/>',
+    "/stats": '<path d="M4 20h17M7 16v-5M12 16V4M17 16V8"/>',
+    "/zapret": '<path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/>',
+    "/settings": '<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="18" r="2"/>',
+}
+PAGE_DESCRIPTIONS = {
+    "/classic": "Ваши подписки, источники и публичные ссылки — в одном месте.",
+    "/cluster": "Состояние серверов, домены и автоматическое переключение.",
+    "/stats": "Активность подписок и управление доступом устройств.",
+    "/zapret": "Проверка доступности сервисов и настройка стратегий обхода.",
+    "/settings": "Домены подписок, параметры синхронизации и фейловера.",
+}
+
+
 def nav_links(active):
-    out = []
+    links = []
     for href, label in NAV_ITEMS:
-        cls = "navlink active" if href == active else "navlink"
-        out.append(f'<a class="{cls}" href="{href}">{esc(label)}</a>')
-    out.append('<form class="inline" method="post" action="/logout">'
-               '<button class="btn ghost" type="submit">Выйти</button></form>')
-    return "".join(out)
+        label = {"/": "Редактор", "/classic": "Подписки", "/zapret": "Диагностика"}.get(href, label)
+        current = ' aria-current="page"' if href == active else ""
+        links.append(f'<a class="navlink{" active" if href == active else ""}" href="{href}"{current}>'
+                     f'<svg viewBox="0 0 24 24" aria-hidden="true">{NAV_ICONS[href]}</svg>{esc(label)}</a>')
+    description = PAGE_DESCRIPTIONS.get(active, "")
+    return ( '<a class="skip-link" href="#editor">К рабочей области</a>' if active == "/" else
+             '<a class="skip-link" href="#main-content">К содержимому</a>') + f"""
+<button class="mobile-menu btn" type="button" aria-label="Открыть меню" aria-expanded="false" aria-controls="sidebar">☰ <span>Sub Cluster</span></button>
+<button class="nav-backdrop" type="button" aria-label="Закрыть меню" tabindex="-1"></button>
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="/"><span class="brand-mark">s<span>c</span></span><span>Sub Cluster<small>ПАНЕЛЬ УПРАВЛЕНИЯ</small></span></a>
+  <div class="nav-caption">РАБОЧЕЕ ПРОСТРАНСТВО</div>
+  <nav aria-label="Основная навигация">{''.join(links)}</nav>
+  <div class="sidebar-bottom"><div class="workspace-note"><span class="workspace-dot"></span><div>Ваш кластер<small>Подписки под контролем</small></div></div>
+  <form method="post" action="/logout"><button class="logout-btn" type="submit">Выйти из аккаунта <span aria-hidden="true">↗</span></button></form></div>
+</aside>
+{f'<p class="page-description">{description}</p>' if description else ''}
+"""
+
+
+def metrics(items):
+    return '<div class="metrics">' + ''.join(
+        f'<div class="metric"><span>{esc(label)}</span><strong>{esc(value)}</strong><small>{esc(note)}</small></div>'
+        for label, value, note in items) + '</div>'
+
+
+def route_search():
+    return '<div class="search-bar"><label for="route-search">Найти подписку</label><input id="route-search" type="search" placeholder="Название или путь…" autocomplete="off"><span id="search-count" class="muted" aria-live="polite"></span></div><div id="search-empty" class="empty-state" hidden>Ничего не найдено. Попробуйте другое название или путь.</div>'
 
 
 EXTRA_CSS = """
@@ -218,42 +258,42 @@ def render_login(error=""):
     err = f'<div class="flash err">{esc(error)}</div>' if error else ""
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Вход — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
-<body><div class="wrap"><div class="card login-box">
-<h1>Панель кластера подписок</h1><div class="sub">Войдите для управления</div>
+<title>Вход — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
+<body class="login-page"><div class="login-layout"><div class="login-story"><a class="brand" href="/"><span class="brand-mark">s<span>c</span></span><span>Sub Cluster</span></a><div class="login-pitch"><div class="eyebrow">ВАША СЕТЬ. ВАШИ ПРАВИЛА.</div><h2>Все подключения. <br>Один центр <br><em>управления.</em></h2><p>Подписки, маршруты и серверы.<br>Всё, что нужно вашему кластеру.</p><div class="login-orbit" aria-hidden="true"><span>Источники</span><i></i><b>sc</b><i></i><span>Подписки</span></div></div><div class="login-foot">Пространство для вашей инфраструктуры</div></div><div class="card login-box">
+<div class="eyebrow">ДОБРО ПОЖАЛОВАТЬ</div><h1>Войти в панель</h1><div class="sub">Управляйте своим кластером из одного места.</div>
 {err}
 <form method="post" action="/login">
-<label>Логин</label><input name="user" autocomplete="username" autofocus>
-<label>Пароль</label><input name="password" type="password" autocomplete="current-password">
-<div style="margin-top:16px"><button class="btn" type="submit">Войти</button></div>
-</form></div></div></body></html>"""
+<label for="login-user">Логин</label><input id="login-user" name="user" autocomplete="username" placeholder="Ваш логин" required autofocus>
+<label for="login-password">Пароль</label><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Введите пароль" required>
+<div style="margin-top:16px"><button class="btn primary" type="submit">Войти в панель <span aria-hidden="true">→</span></button></div>
+</form></div></div><script>{SHELL_JS}</script></body></html>"""
 
 
 # ── нодовый редактор ───────────────────────────────────────────────────────
 def render_editor(graph, sub_base, csrf, banner="", domains=None):
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Граф — Sub Cluster</title><style>{EDITOR_CSS}{EXTRA_CSS}</style></head>
-<body>
-<div id="top">
-  <span class="title">Подписки — граф</span>
-  {nav_links("/")}
-  <span style="width:14px"></span>
+<title>Граф — Sub Cluster</title><style>{EDITOR_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
+<body class="editor-page">
+{nav_links("/")}
+<header class="editor-heading"><div><div class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</div><h1>Редактор подписок</h1></div><span class="editor-description">Соединяйте источники. Создавайте маршруты.</span></header>
+<div id="top" role="toolbar" aria-label="Инструменты графа">
+  <div class="tool-group tool-create"><span class="tool-label">Добавить</span>
   <button class="btn" id="addSrc">+ Источник</button>
   <button class="btn" id="addKey">+ Ключ</button>
   <button class="btn" id="addGroup">+ Группа</button>
   <button class="btn" id="addAuto">+ Авто-выбор</button>
   <button class="btn" id="addRouter">+ Роутер</button>
   <button class="btn" id="addRoute">+ Маршрут</button>
-  <button class="btn gray" id="reset">Сбросить вид</button>
+  </div><div class="tool-group tool-actions"><button class="btn gray" id="reset">Сбросить вид</button>
   <button class="btn gray" id="blurToggle">Показать ссылки</button>
   <button class="btn" id="autosaveToggle">Автосейв: вкл</button>
   <span class="spacer"></span>
   <span id="savestat"></span>
-  <button class="btn primary" id="save">Сохранить</button>
+  <button class="btn primary" id="save">Сохранить</button></div>
 </div>
 {banner}
-<div id="editor">
+<div id="editor" tabindex="-1" aria-label="Граф подписок">
   <svg id="wires" xmlns="http://www.w3.org/2000/svg"></svg>
   <div id="world"></div>
   <div id="hint">Пусто. Добавь «<b>+ Источник</b>» или «<b>+ Ключ</b>», потом «<b>+ Маршрут</b>», протяни связь и «<b>Сохранить</b>».<br>
@@ -262,7 +302,7 @@ def render_editor(graph, sub_base, csrf, banner="", domains=None):
 <div id="toast"></div>
 <script>window.__GRAPH__={js_embed(graph)};window.__ADMIN__="";window.__CSRF__={js_embed(csrf)};window.__BASE__={js_embed(sub_base)};window.__DOMAINS__={js_embed(domains or [])};window.__BAL_DEFAULTS__={js_embed(subscriptions._BALANCER_DEFAULTS)};window.__PRESETS__={js_embed(subscriptions.ROUTER_PRESETS)};</script>
 <script>{EDITOR_JS}</script>
-</body></html>"""
+<script>{SHELL_JS}</script></body></html>"""
 
 
 # ── классический список ────────────────────────────────────────────────────
@@ -350,13 +390,15 @@ def render_classic(routes, sub_base, flash="", flash_err=False, domains=None):
     flash_html = f'<div class="flash {"err" if flash_err else ""}">{esc(flash)}</div>' if flash else ""
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Список — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
-<body><div class="wrap">
-<div class="route-head"><div><h1>Маршруты (список)</h1>
-<div class="sub">Слияние подписок, переименование, свои пути</div></div>
+<title>Список — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
+<body class="app-page"><div class="wrap" id="main-content" tabindex="-1">
+<div class="route-head"><div><h1>Подписки</h1>
+<div class="eyebrow">УПРАВЛЕНИЕ МАРШРУТАМИ</div></div>
 <button class="btn small gray" onclick="document.body.classList.toggle('unblur')">Показать/скрыть ссылки</button></div>
 <div style="margin-bottom:16px">{nav_links("/classic")}</div>
-{flash_html}{cards}<hr>
+{metrics([("Подписки", len(routes), "Всего маршрутов"), ("Включены", sum(r.get("enabled", True) for r in routes), "Доступны клиентам"), ("Домены", len(domains or []), "Домены подписок")])}
+{route_search()}
+{flash_html}<div id="route-results">{cards}</div><hr>
 <div class="card"><div class="route-title">Новый маршрут</div>
 <form method="post" action="/routes/create">
   <label>Название</label><input name="title" placeholder="Моя подписка">
@@ -368,7 +410,7 @@ def render_classic(routes, sub_base, flash="", flash_err=False, domains=None):
   <label>Текст под подпиской (announce)</label><textarea name="announce" placeholder="Бот — @mybot&#10;Поддержка — https://..."></textarea>
   <div style="margin-top:12px"><button class="btn primary" type="submit">Создать</button></div>
 </form></div>
-</div></body></html>"""
+</div><script>{SHELL_JS}</script></body></html>"""
 
 
 # ── кластер ────────────────────────────────────────────────────────────────
@@ -465,10 +507,11 @@ def render_cluster(status, sub_base, flash="", flash_err=False):
     ) if status.get("domains") else ""
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Кластер — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
-<body><div class="wrap">
-<h1>Кластер и фейловер</h1>
+<title>Кластер — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
+<body class="app-page"><div class="wrap" id="main-content" tabindex="-1">
+<h1>Кластер</h1>
 <div style="margin:8px 0 16px">{nav_links("/cluster")}</div>
+{metrics([("Серверы", len(status["nodes"]), "Узлов в кластере"), ("На связи", sum(n["alive"] for n in status["nodes"]), "Доступны сейчас"), ("Домены", len(status.get("domains", [])), "Под управлением DNS")])}
 {flash_html}
 <div class="card">
   <div class="grid2">
@@ -498,7 +541,7 @@ def render_cluster(status, sub_base, flash="", flash_err=False):
 Redeploy-вебхук: Coolify — его deploy-webhook (сам делает git pull+build); standalone — агент redeploy-agent.py на хосте.</div>
 </div>
 <div class="card"><div class="route-title">Журнал переключений</div><div style="margin-top:8px">{hist or '<span class="muted">пусто</span>'}</div></div>
-</div></body></html>"""
+</div><script>{SHELL_JS}</script></body></html>"""
 
 
 # ── настройки ──────────────────────────────────────────────────────────────
@@ -521,14 +564,14 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
     chk = lambda v: " checked" if v else ""
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Настройки — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
-<body><div class="wrap">
+<title>Настройки — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
+<body class="app-page"><div class="wrap" id="main-content" tabindex="-1">
 <h1>Настройки</h1>
 <div style="margin:8px 0 16px">{nav_links("/settings")}</div>
 {crypto_warn}{flash_html}
 <form method="post" action="/settings/save" id="setform">
 <fieldset><legend>Домены подписок (у каждого свой аккаунт reg.ru)</legend>
-  <div class="help" style="margin-bottom:10px">Каждый домен фейловерится отдельно: его A-запись
+  <details class="setup-help"><summary>Как настроить домены и прокси</summary><div class="help" style="margin-bottom:10px">Каждый домен фейловерится отдельно: его A-запись
   переписывается на свой активный узел его аккаунтом reg.ru. IP всех узлов должны быть в белом списке
   API в настройках соответствующего аккаунта reg.ru. «Домен по умолчанию» отдаёт маршруты без явно
   выбранного домена. Admin-домены узлов статичные — reg.ru их не трогает.
@@ -537,7 +580,7 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
   <code>happ.region.example.com</code>). Зону на 3-й уровень дробить не нужно — её ведёт reg.ru.
   <br><b>Coolify/прокси:</b> привяжи КАЖДЫЙ домен подписок к порту подписок
   <b>{esc(sub_port)}</b> (SUB_PORT), а admin-домен узла — к порту <b>{esc(admin_port)}</b> (ADMIN_PORT).
-  Готовая строка для поля «Domains» — ниже.</div>
+  Готовая строка для поля «Domains» — ниже.</div></details>
   <div id="domlist"></div>
   <button class="btn small" type="button" id="addDom">+ Добавить домен</button>
   <div id="coolify" style="margin-top:12px"></div>
@@ -557,7 +600,7 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
 </form>
 <script>window.__SDOMAINS__={js_embed(domains_ui)};window.__SNODES__={js_embed(nodes_ui)};window.__SUB_PORT__={js_embed(sub_port)};</script>
 <script>{SETTINGS_JS}</script>
-</div></body></html>"""
+</div><script>{SHELL_JS}</script></body></html>"""
 
 
 # ── статистика ─────────────────────────────────────────────────────────────
@@ -611,21 +654,22 @@ def render_stats(stats, routes, node_id, sub_base, blocked_devices=None, csrf=""
     body = "".join(blocks) or '<div class="card muted">Пока нет обращений к маршрутам в кластере.</div>'
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Статистика — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
-<body><div class="wrap">
+<title>Статистика — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
+<body class="app-page"><div class="wrap" id="main-content" tabindex="-1">
 <h1>Статистика</h1>
 <div style="margin:8px 0 16px">{nav_links("/stats")}</div>
-<div class="muted" style="margin-bottom:12px">Сводно по <b>всему кластеру</b>: запросы клиентов
+{metrics([("Запросы", sum(st.get("requests", 0) for st in stats.values()), "Обращения к подпискам"), ("Подписки с активностью", len(stats), "За период сбора"), ("Блокировки", len(blocked), "Устройство × подписка")])}
+<details class="setup-help"><summary>Как собирается статистика и работают блокировки</summary><div class="muted" style="margin-bottom:12px">Сводно по <b>всему кластеру</b>: запросы клиентов
 к подпискам со всех живых узлов (опрашиваются на лету). Столбец «Узлы» — на каких узлах
 видели устройство. Этот узел: <b>{esc(node_id)}</b>. Сброс рассылается на все живые
   узлы (узел, который сейчас офлайн, обнулится только когда вернётся — вручную).
   Блокировка действует на устройство только в выбранной подписке и синхронизируется по
   кластеру. Если HWID отсутствует, используется IP — за общим IP могут находиться другие люди.
-<button class="btn small gray" onclick="document.body.classList.toggle('unblur')">Показать/скрыть пути</button></div>
+</div></details><button class="btn small gray" style="margin-bottom:20px" onclick="document.body.classList.toggle('unblur')">Показать/скрыть пути</button>
 {body}
 <form class="inline" method="post" action="/stats/reset" style="margin-top:8px">
   <button class="btn small ghost" type="submit" onclick="return confirm('Сбросить статистику по всему кластеру?')">Сбросить всё (по кластеру)</button></form>
-</div></body></html>"""
+</div><script>{SHELL_JS}</script></body></html>"""
 
 
 # ── zapret (обход DPI): стратегии + авто-тест ───────────────────────────────
@@ -655,22 +699,22 @@ def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", d
                   'доступность.</div>')
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>zapret — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}</style></head>
-<body><div class="wrap">
-<h1>zapret — обход DPI (диагностика)</h1>
+<title>zapret — Sub Cluster</title><style>{PAGE_CSS}{EXTRA_CSS}{SHELL_CSS}</style></head>
+<body class="app-page"><div class="wrap" id="main-content" tabindex="-1">
+<h1>Диагностика</h1>
 <div style="margin:8px 0 16px">{nav_links("/zapret")}</div>
 <div class="muted" style="margin-bottom:12px">Узел: <b>{esc(node_id)}</b>. Это <b>выбор стратегии и проверка
 доступности НА УЗЛЕ</b> — авто-тест меряет, какие из заблокированных сервисов доступны (с обходом и без).
 Конечное применение обхода к трафику клиента появится с узлом-прокси-шлюзом (отдельная фаза).</div>
 {banner}
 <div class="card"><div class="route-title">Стратегии</div>
-  <div class="help" style="margin:4px 0 10px">Параметры — флаги <span class="mono">nfqws</span>, можно
+  <details class="setup-help"><summary>Формат стратегий и параметры</summary><div class="help" style="margin:4px 0 10px">Параметры — флаги <span class="mono">nfqws</span>, можно
   <b>вставить готовый конфиг zapret целиком</b>, в т.ч. мульти-секционный через
   <span class="mono">--new</span> (напр. <span class="mono">--filter-udp=443 --dpi-desync=fake
   --dpi-desync-fake-quic=/opt/zapret/bin/quic.bin --new --filter-tcp=80,443
   --dpi-desync=hostfakesplit …</span>). Пути к листам/бинам (<span class="mono">--hostlist=…</span>,
   <span class="mono">--ipset=…</span>) берутся как есть. Пусто = «direct» (без обхода).
-  «Активная» — что применяется (авто-тест сам ставит лучшую, можно сменить).</div>
+  «Активная» — что применяется (авто-тест сам ставит лучшую, можно сменить).</div></details>
   <div id="zlist"></div>
   <button class="btn small" type="button" id="zadd">+ стратегия</button>
   <button class="btn small gray" type="button" id="zdirect">+ direct</button>
@@ -693,7 +737,7 @@ def render_zapret(z, services, available, can_apply, node_id, csrf, reason="", d
 <div id="ztoast" style="position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#2c2c30;border:1px solid #444;padding:10px 16px;border-radius:9px;z-index:300;display:none;font-size:13px"></div>
 <script>window.__ZAP__={js_embed(z_ui)};window.__ZCSRF__={js_embed(csrf)};</script>
 <script>{ZAPRET_JS}</script>
-</div></body></html>"""
+</div><script>{SHELL_JS}</script></body></html>"""
 
 
 ZAPRET_JS = r"""

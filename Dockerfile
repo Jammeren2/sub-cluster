@@ -5,7 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 WORKDIR /app
-COPY *.py editor.js editor.css ./
+COPY *.py editor.js editor.css shell.js shell.css ./
 # flowseal-данные (стратегии + hostlists + fake-payload'ы) — приложение читает стратегии
 # из /app/assets, а nfqws — листы/бины из /opt/zapret/{lists,bin} (см. ниже).
 COPY assets ./assets
