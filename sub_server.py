@@ -140,7 +140,7 @@ def personal_operation(route, payload, remote=False):
             announce = (route.get('announce') or '').strip()
             if announce:
                 headers['Announce'] = subs._b64_header(announce)
-        return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers}
+        return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers, "personal_name": details["name"]}
     return {"ok": True, "items": [{"id": item["id"], "name": item["name"]} for item in items],
             "configured": bool(os.environ.get('TURNSTILE_SITE_KEY') and os.environ.get('TURNSTILE_SECRET_KEY')),
             **(details or {})}
@@ -887,6 +887,7 @@ class SubHandler(_Base):
             self._respond(404, b"not found")
             return
         d = self._device()
+        personal_name = ""
         output_format = subs.select_output_format(self.path, self.headers.get("User-Agent", ""), self.headers.get("Accept", ""))
         if route.get('access') == 'private' and 'text/html' in self.headers.get('Accept', '').lower():
             page = portal.render(route, portal_csrf(route, self._req_host()), os.environ.get('TURNSTILE_SITE_KEY', ''), slug)
@@ -910,6 +911,7 @@ class SubHandler(_Base):
             try:
                 result = personal_operation(route, {'op': 'fetch', 'slug': slug, 'device': d, 'format': output_format, 'claim': self.command != 'HEAD'})
                 body, headers = base64.b64decode(result['body']), result['headers']
+                personal_name = result.get('personal_name', '')
             except personal.PersonalError as e:
                 body, headers = personal.notice('Личная подписка недоступна', str(e), output_format)
             except Exception:
@@ -922,7 +924,7 @@ class SubHandler(_Base):
                 return
         if self.command != 'HEAD':
             try:
-                STORE.record_device(route['id'], d['hwid'], d['model'], d['app'], d['ip'])
+                STORE.record_device(route['id'], d['hwid'], d['model'], d['app'], d['ip'], personal_name=personal_name)
             except Exception:
                 pass
         headers = {**headers, "Cache-Control": "no-store", "Vary": "Accept, User-Agent, X-App-Version, X-Hwid"}

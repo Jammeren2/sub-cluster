@@ -104,6 +104,9 @@ class Store:
             " app TEXT, ip TEXT, cnt INTEGER NOT NULL DEFAULT 0,"
             " first_ts REAL, last_ts REAL, PRIMARY KEY(route_id, device))"
         )
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(device_seen)")}
+        if "personal_name" not in columns:
+            self._conn.execute("ALTER TABLE device_seen ADD COLUMN personal_name TEXT NOT NULL DEFAULT ''")
         self._conn.commit()
         self._ensure("config", DEFAULT_CONFIG)
         self._ensure("failover", DEFAULT_FAILOVER)
@@ -403,7 +406,7 @@ class Store:
         return self.get("members") or {"nodes": {}}
 
     # ── статистика устройств/маршрутов (локальная) ────────────────────────
-    def record_device(self, route_id, hwid, model, app, ip, max_per_route=2000):
+    def record_device(self, route_id, hwid, model, app, ip, max_per_route=2000, personal_name=""):
         """Засчитать обращение устройства к маршруту. Поля приходят из заголовков
         неаутентифицированного клиента — ограничиваем длину и число строк (LRU),
         чтобы X-Hwid со случайными значениями не раздул БД (disk-fill DoS)."""
@@ -415,11 +418,12 @@ class Store:
         now = time.time()
         with self._lock:
             self._conn.execute(
-                "INSERT INTO device_seen(route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts)"
-                " VALUES(?,?,?,?,?,?,1,?,?)"
+                "INSERT INTO device_seen(route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts,personal_name)"
+                " VALUES(?,?,?,?,?,?,1,?,?,?)"
                 " ON CONFLICT(route_id,device) DO UPDATE SET cnt=cnt+1, last_ts=?,"
-                " model=excluded.model, app=excluded.app, ip=excluded.ip",
-                (route_id, device, hwid, model, app, ip, now, now, now),
+                " model=excluded.model, app=excluded.app, ip=excluded.ip,"
+                " personal_name=CASE WHEN excluded.personal_name != '' THEN excluded.personal_name ELSE device_seen.personal_name END",
+                (route_id, device, hwid, model, app, ip, now, now, str(personal_name or "")[:80], now),
             )
             # держим не более N последних устройств на маршрут
             self._conn.execute(
@@ -485,14 +489,14 @@ class Store:
         """→ {route_id: {requests, devices:[{device,hwid,model,app,ip,cnt,last_ts,first_ts}]}}"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts FROM device_seen"
+                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts,personal_name FROM device_seen"
                 " ORDER BY last_ts DESC LIMIT 5000"
             ).fetchall()
         out = {}
         for r in rows:
             rid = r[0]
             d = {"device": r[1], "hwid": r[2], "model": r[3], "app": r[4],
-                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8]}
+                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8], "personal_name": r[9]}
             e = out.setdefault(rid, {"requests": 0, "devices": []})
             e["requests"] += r[6]
             e["devices"].append(d)
@@ -502,11 +506,11 @@ class Store:
         """Сырые строки статистики этого узла (для отдачи пирам)."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts FROM device_seen"
+                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts,personal_name FROM device_seen"
                 " ORDER BY last_ts DESC LIMIT 5000"
             ).fetchall()
         return [{"route_id": r[0], "device": r[1], "hwid": r[2], "model": r[3], "app": r[4],
-                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8]} for r in rows]
+                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8], "personal_name": r[9]} for r in rows]
 
     def reset_stats(self, route_id=None):
         with self._lock:

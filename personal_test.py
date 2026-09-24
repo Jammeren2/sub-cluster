@@ -68,6 +68,77 @@ class PersonalTests(unittest.TestCase):
         self.assertEqual(route['access'], 'private')
         self.assertEqual(route['personal_owner'], server.CLUSTER.id)
 
+    def test_chained_routes_keep_content_and_destination_access(self):
+        for upstream_access in ('public', 'private'):
+            for downstream_access in ('public', 'private'):
+                with self.subTest(upstream=upstream_access, downstream=downstream_access):
+                    data = graph.get_graph(server.STORE)
+                    data['routes'][0]['access'] = upstream_access
+                    downstream = {**data['routes'][0], 'id': 'chainroute01',
+                                  'path': '/chained', 'title': 'Downstream',
+                                  'access': downstream_access}
+                    data['routes'] = [data['routes'][0], downstream]
+                    data['edges'] = [e for e in data['edges'] if e['to'] != downstream['id']]
+                    data['edges'].append({'from': self.route['id'], 'to': downstream['id']})
+                    self.assertTrue(graph.save_graph(server.STORE, data)[0])
+                    route = next(r for r in graph.get_routes(server.STORE) if r['id'] == downstream['id'])
+                    if downstream_access == 'public':
+                        status, body, _ = self.request('/chained', {'X-Hwid': 'phone-chain'})
+                        self.assertEqual(status, 200)
+                        self.assertEqual(set(subs.extract_links(body)), {LINK1, LINK2})
+                    else:
+                        result = server.personal_operation(route, {'op': 'catalog'})
+                        self.assertEqual({x['id'] for x in result['items']}, {x['id'] for x in self.catalog})
+                        link = server.PERSONAL.create(route['id'], 'Chain', '', [self.catalog[0]['id']])
+                        status, body, _ = self.request('/chained/' + link['slug'], {'X-Hwid': 'phone-chain'})
+                        self.assertEqual(status, 200)
+                        self.assertEqual(subs.extract_links(body), [LINK1])
+
+    def test_branching_mirror_routes_through_private_route(self):
+        data = graph.get_graph(server.STORE)
+        template = data['routes'][0]
+        data['sources'] = [{'id': 'source0001', 'type': 'source', 'url': 'https://upstream.example/one'},
+                           {'id': 'source0002', 'type': 'source', 'url': 'https://upstream.example/two'}]
+        data['routes'] = [{**template, 'id': rid, 'path': '/' + rid, 'mode': mode, 'access': access}
+                          for rid, mode, access in [('route0001', 'mirror', 'public'),
+                                                    ('route0002', 'mirror', 'public'),
+                                                    ('route0003', 'mirror', 'private'),
+                                                    ('route0004', 'merge', 'private'),
+                                                    ('route0005', 'merge', 'public'),
+                                                    ('route0006', 'merge', 'public')]]
+        data['edges'] = [{'from': fr, 'to': to} for fr, to in [
+            ('source0001', 'route0001'), ('source0002', 'route0002'),
+            ('route0001', 'route0003'), ('route0002', 'route0003'),
+            ('route0003', 'route0004'), ('route0003', 'route0005'), ('route0003', 'route0006')]]
+        self.assertTrue(graph.save_graph(server.STORE, data)[0])
+        def fetch(url):
+            self.assertIn(url, ('https://upstream.example/one', 'https://upstream.example/two'))
+            return base64.b64encode((LINK1 if url.endswith('/one') else LINK2).encode()), {}
+        with patch.object(subs, 'fetch_upstream_cached', side_effect=fetch):
+            for rid in ('route0005', 'route0006'):
+                status, body, _ = self.request('/' + rid, {'X-Hwid': 'phone-chain'})
+                self.assertEqual(status, 200)
+                self.assertEqual(set(subs.extract_links(body)), {LINK1, LINK2})
+            route = next(r for r in graph.get_routes(server.STORE) if r['id'] == 'route0004')
+            result = server.personal_operation(route, {'op': 'catalog'})
+            self.assertEqual({x['id'] for x in result['items']}, {x['id'] for x in self.catalog})
+
+    def test_personal_names_in_statistics(self):
+        link = server.PERSONAL.create(self.route['id'], '<Alice & Bob>', '', [self.catalog[0]['id']])
+        self.request(self.path + '/' + link['slug'], {'X-Hwid': 'named-phone'})
+        rows = server.STORE.get_stats()[self.route['id']]['devices']
+        self.assertEqual(next(r for r in rows if r['hwid'] == 'named-phone')['personal_name'], '<Alice & Bob>')
+        self.request(self.path + '/' + link['slug'], {'X-Hwid': 'other-phone'})
+        rows = server.STORE.get_stats()[self.route['id']]['devices']
+        self.assertEqual(next(r for r in rows if r['hwid'] == 'other-phone')['personal_name'], '')
+        server.STORE.record_device(self.route['id'], 'named-phone', '', '', '127.0.0.1')
+        stats = server.CLUSTER.cluster_stats()
+        row = next(r for r in stats[self.route['id']]['devices'] if r['hwid'] == 'named-phone')
+        self.assertEqual(row['personal_name'], '<Alice & Bob>')
+        html = server.webui.render_stats(stats, graph.get_routes(server.STORE), 'test', '')
+        self.assertIn('&lt;Alice &amp; Bob&gt;', html)
+        self.assertNotIn('<Alice & Bob>', html)
+
     def test_private_base_notice_and_browser(self):
         status, body, headers = self.request()
         self.assertEqual(status, 200)

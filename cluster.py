@@ -678,6 +678,9 @@ class Cluster:
                 if lt > e["last_ts"]:
                     e["last_ts"] = lt
                     e["model"], e["app"], e["ip"], e["hwid"] = r.get("model"), r.get("app"), r.get("ip"), r.get("hwid")
+                if r.get("personal_name") and lt >= e.get("personal_name_ts", 0):
+                    e["personal_name"] = r["personal_name"]
+                    e["personal_name_ts"] = lt
                 ft = float(r.get("first_ts") or 0)
                 if ft and (not e["first_ts"] or ft < e["first_ts"]):
                     e["first_ts"] = ft
