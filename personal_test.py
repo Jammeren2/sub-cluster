@@ -81,6 +81,7 @@ class PersonalTests(unittest.TestCase):
         self.assertEqual(headers['Cache-Control'], 'no-store')
 
     def test_all_public_version_gate_and_exemptions(self):
+        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_client_version=True))
         graph.update_route(server.STORE, self.route['id'], access='public')
         _, body, headers = self.request(headers={'X-Forwarded-For': '203.0.113.5'})
         self.assertIn('Happ', base64.b64decode(headers['Announce'][7:]).decode())
@@ -90,6 +91,25 @@ class PersonalTests(unittest.TestCase):
         for ip in personal.EXEMPT_IPS:
             _, body, _ = self.request(headers={'X-Forwarded-For': ip})
             self.assertEqual(len(subs.extract_links(body)), 2)
+
+    def test_version_protection_default_off_and_settings_toggle(self):
+        # Existing configs with no new flag must restore clients immediately.
+        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).pop('require_client_version', None))
+        self.assertFalse(server.STORE.get_settings()['require_client_version'])
+        graph.update_route(server.STORE, self.route['id'], access='public')
+        self.assertEqual(len(subs.extract_links(self.request()[1])), 2)
+        handler = object.__new__(server.AdminHandler)
+        self.assertTrue(handler._save_settings({'domains_json':['[]'], 'require_client_version':['1']}))
+        self.assertTrue(server.STORE.get_settings()['require_client_version'])
+        self.assertIn('blocked.invalid', base64.b64decode(self.request()[1]).decode())
+        self.assertTrue(handler._save_settings({'domains_json':['[]']}))
+        self.assertFalse(server.STORE.get_settings()['require_client_version'])
+        self.assertEqual(len(subs.extract_links(self.request()[1])), 2)
+        graph.update_route(server.STORE, self.route['id'], access='private')
+        link=self.create(); path=self.path+'/'+link['slug']
+        self.assertEqual(len(subs.extract_links(self.request(path, {'X-Hwid':'phone'})[1])), 1)
+        rejected=self.request(path, {'X-Hwid':'other-phone'})
+        self.assertIn('другом устройстве',base64.b64decode(rejected[2]['Announce'][7:]).decode())
 
     def test_proxy_chain_and_spoofed_exemption(self):
         self.assertEqual(personal.client_ip('203.0.113.8', {'X-Forwarded-For': '37.193.168.134'}), '203.0.113.8')
@@ -112,6 +132,7 @@ class PersonalTests(unittest.TestCase):
         self.assertIn('другом устройстве', base64.b64decode(headers['Announce'][7:]).decode())
 
     def test_missing_hwid_and_client_version_never_claim(self):
+        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_client_version=True))
         result = self.create(); path = self.path + '/' + result['slug']
         for hdr in ({'X-App-Version': '1.2.3'}, {'X-Hwid': 'A'}, {'X-Forwarded-For': '37.193.168.134'}):
             _, body, _ = self.request(path, hdr)

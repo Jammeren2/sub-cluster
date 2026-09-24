@@ -810,6 +810,7 @@ class AdminHandler(_Base):
                 dns["regru_username"] = dflt["regru_username"]
                 dns["regru_password_enc"] = dflt["regru_password_enc"]
                 s["sub_public_base"] = dflt.get("public_base", "")
+            s["require_client_version"] = ("require_client_version" in f)
             s["failover_enabled"] = ("failover_enabled" in f)
             s["require_quorum"] = ("require_quorum" in f)
             s["preempt"] = ("preempt" in f)
@@ -889,7 +890,7 @@ class SubHandler(_Base):
             body, headers = subs.build_blocked_response(output_format)
         elif route.get('access') == 'private' and not slug:
             body, headers = personal.notice('Откройте в браузере', personal.OPEN_MESSAGE, output_format)
-        elif d['ip'] not in personal.EXEMPT_IPS and not personal.has_version(self.headers):
+        elif STORE.get_settings().get('require_client_version', False) and d['ip'] not in personal.EXEMPT_IPS and not personal.has_version(self.headers):
             body, headers = personal.notice('Используйте другой VPN-клиент', personal.VERSION_MESSAGE, output_format)
         elif slug:
             try:

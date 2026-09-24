@@ -587,6 +587,10 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
   <button class="btn small" type="button" id="addDom">+ Добавить домен</button>
   <div id="coolify" style="margin-top:12px"></div>
 </fieldset>
+<fieldset><legend>Защита подписок</legend>
+  <label class="row"><input type="checkbox" name="require_client_version" value="1" style="width:auto"{chk(settings.get('require_client_version', False))}> <span>Блокировать VPN-клиенты без версии приложения</span></label>
+  <div class="help">По умолчанию выключено для совместимости с Happ и другими клиентами. Включайте только если ваши клиенты передают X-App-Version. Настройка действует на общественные и личные подписки и синхронизируется между узлами. Привязка личных ссылок к одному устройству остаётся включённой.</div>
+</fieldset>
 <fieldset><legend>Фейловер</legend>
   <label class="row"><input type="checkbox" name="failover_enabled" value="1" style="width:auto"{chk(settings.get('failover_enabled'))}> <span>Авто-фейловер включён</span></label>
   <label class="row" style="margin-top:8px"><input type="checkbox" name="require_quorum" value="1" style="width:auto"{chk(settings.get('require_quorum'))}> <span>Требовать кворум для захвата мёртвого активного (защита от split-brain)</span></label>
