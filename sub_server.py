@@ -889,7 +889,15 @@ class SubHandler(_Base):
         if STORE.is_device_blocked(route["id"], d["hwid"], d["ip"]):
             body, headers = subs.build_blocked_response(output_format)
         elif route.get('access') == 'private' and not slug:
-            body, headers = personal.notice('Откройте в браузере', personal.OPEN_MESSAGE, output_format)
+            settings = STORE.get_settings()
+            base = graph.domain_public_base(graph.effective_domain(settings, route) or {})
+            if not base:
+                base = (settings.get('sub_public_base') or '').strip().rstrip('/')
+            if not base:
+                base = ('https' if self._is_https() else 'http') + '://' + self._req_host()
+            subscription_url = base.rstrip('/') + route['path']
+            message = personal.OPEN_MESSAGE + '\n\nСсылка подписки: ' + subscription_url
+            body, headers = personal.notice('Откройте в браузере', message, output_format)
         elif STORE.get_settings().get('require_client_version', False) and d['ip'] not in personal.EXEMPT_IPS and not personal.has_version(self.headers):
             body, headers = personal.notice('Используйте другой VPN-клиент', personal.VERSION_MESSAGE, output_format)
         elif slug:

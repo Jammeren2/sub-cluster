@@ -74,11 +74,23 @@ class PersonalTests(unittest.TestCase):
         self.assertEqual(len(subs.extract_links(body)), 1)
         self.assertIn('Откройте в браузере', subs._frag_name(subs.extract_links(body)[0]))
         self.assertIn('браузере', base64.b64decode(headers['Announce'][7:]).decode())
+        self.assertIn(self.base + self.path, base64.b64decode(headers['Announce'][7:]).decode())
         status, body, headers = self.request(headers={'Accept': 'text/html'})
         self.assertEqual(status, 200)
         self.assertIn(b'personal-form', body)
         self.assertNotIn(LINK1.encode(), body)
         self.assertEqual(headers['Cache-Control'], 'no-store')
+
+    def test_browser_notice_uses_configured_subscription_url(self):
+        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(dns={'domains':[
+            {'id':'main','zone':'example.com','subdomain':'vpn','enabled':True,'default':True,'public_base':'https://vpn.example.com'}
+        ]}))
+        for suffix in ('?format=happ', '?format=clash'):
+            _, _, headers = self.request(self.path + suffix, {'Host':'internal.invalid'})
+            message = base64.b64decode(headers['Announce'][7:]).decode()
+            self.assertIn('https://vpn.example.com' + self.path, message)
+            self.assertNotIn('internal.invalid', message)
+            self.assertNotIn('?format=', message)
 
     def test_all_public_version_gate_and_exemptions(self):
         server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_client_version=True))
