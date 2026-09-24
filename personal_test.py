@@ -38,7 +38,7 @@ class PersonalTests(unittest.TestCase):
         cls.http.shutdown(); cls.http.server_close(); cls.thread.join()
 
     def setUp(self):
-        server.STORE.put('config', {**server.storemod.DEFAULT_CONFIG, 'routes': [], 'sources': [], 'edges': []})
+        server.STORE.put('config', {**server.storemod.DEFAULT_CONFIG, 'settings':json.loads(json.dumps(server.storemod.DEFAULT_CONFIG['settings'])), 'routes': [], 'sources': [], 'edges': []})
         self.path = '/s/' + os.urandom(5).hex()
         graph.add_route(server.STORE, self.path, 'Private', [LINK1, LINK2], 'merge', access='private')
         self.route = graph.get_routes(server.STORE)[0]
@@ -92,41 +92,52 @@ class PersonalTests(unittest.TestCase):
             self.assertNotIn('internal.invalid', message)
             self.assertNotIn('?format=', message)
 
-    def test_all_public_version_gate_and_exemptions(self):
-        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_client_version=True))
+    def test_public_hwid_gate_and_exemptions(self):
+        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_device_hwid=True))
         graph.update_route(server.STORE, self.route['id'], access='public')
         _, body, headers = self.request(headers={'X-Forwarded-For': '203.0.113.5'})
         self.assertIn('Happ', base64.b64decode(headers['Announce'][7:]).decode())
         self.assertNotIn('one.example', base64.b64decode(body).decode())
-        _, body, _ = self.request(headers={'X-App-Version': '1.2.3'})
+        _, body, _ = self.request(headers={'X-Hwid': 'phone-uuid'})
         self.assertEqual(len(subs.extract_links(body)), 2)
         for ip in personal.EXEMPT_IPS:
             _, body, _ = self.request(headers={'X-Forwarded-For': ip})
             self.assertEqual(len(subs.extract_links(body)), 2)
 
-    def test_version_protection_default_off_and_settings_toggle(self):
-        # Existing configs with no new flag must restore clients immediately.
-        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).pop('require_client_version', None))
-        self.assertFalse(server.STORE.get_settings()['require_client_version'])
+    def test_hwid_protection_default_on_and_settings_toggle(self):
+        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_client_version=False))
+        server.STORE.update_config(lambda cfg: cfg['settings'].pop('require_device_hwid', None))
+        self.assertTrue(server.STORE.get_settings()['require_device_hwid'])
         graph.update_route(server.STORE, self.route['id'], access='public')
-        self.assertEqual(len(subs.extract_links(self.request()[1])), 2)
-        handler = object.__new__(server.AdminHandler)
-        self.assertTrue(handler._save_settings({'domains_json':['[]'], 'require_client_version':['1']}))
-        self.assertTrue(server.STORE.get_settings()['require_client_version'])
         self.assertIn('blocked.invalid', base64.b64decode(self.request()[1]).decode())
+        handler = object.__new__(server.AdminHandler)
         self.assertTrue(handler._save_settings({'domains_json':['[]']}))
-        self.assertFalse(server.STORE.get_settings()['require_client_version'])
+        self.assertFalse(server.STORE.get_settings()['require_device_hwid'])
         self.assertEqual(len(subs.extract_links(self.request()[1])), 2)
-        graph.update_route(server.STORE, self.route['id'], access='private')
-        link=self.create(); path=self.path+'/'+link['slug']
-        self.assertEqual(len(subs.extract_links(self.request(path, {'X-Hwid':'phone'})[1])), 1)
-        rejected=self.request(path, {'X-Hwid':'other-phone'})
-        self.assertIn('другом устройстве',base64.b64decode(rejected[2]['Announce'][7:]).decode())
+        self.assertTrue(handler._save_settings({'domains_json':['[]'], 'require_device_hwid':['1']}))
+        self.assertTrue(server.STORE.get_settings()['require_device_hwid'])
+        self.assertIn('blocked.invalid', base64.b64decode(self.request()[1]).decode())
+        self.assertEqual(len(subs.extract_links(self.request(headers={'X-Hwid':'phone'})[1])), 2)
+
+    def test_hwid_validation(self):
+        for value in ('', ' ', 'ip:203.0.113.7', 'IP-abc', '203.0.113.7', 'device-203.0.113.7-extra', '::1', '2001:db8::1', 'device-[2001:db8::1]', '::ffff:203.0.113.7'):
+            self.assertFalse(personal.has_device_hwid(value), value)
+        for value in ('phone', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'abcdef0123456789', '  Android-123  '):
+            self.assertTrue(personal.has_device_hwid(value), value)
+
+    def test_dynamic_cluster_ip_exemption(self):
+        graph.update_route(server.STORE,self.route['id'],access='public')
+        with patch.object(server.CLUSTER,'all_nodes',return_value=[{'public_ip':'203.0.113.99','enabled':False}]):
+            self.assertEqual(len(subs.extract_links(self.request(headers={'X-Forwarded-For':'203.0.113.99'})[1])),2)
+            self.assertIn('blocked.invalid',base64.b64decode(self.request(headers={'X-Forwarded-For':'203.0.113.98'})[1]).decode())
+        self.assertTrue(personal.exempt_client_ip('::ffff:37.193.168.134',[]))
+        self.assertTrue(personal.exempt_client_ip('2001:db8::1',[{'public_ip':'2001:0db8::1'}]))
+        self.assertFalse(personal.exempt_client_ip('',[{'public_ip':''}]))
 
     def test_proxy_chain_and_spoofed_exemption(self):
         self.assertEqual(personal.client_ip('203.0.113.8', {'X-Forwarded-For': '37.193.168.134'}), '203.0.113.8')
         self.assertEqual(personal.client_ip('127.0.0.1', {'X-Forwarded-For': '37.193.168.134, 203.0.113.8'}), '203.0.113.8')
-        self.assertFalse(personal.has_version({'X-App-Version': 'unknown'}))
+        self.assertFalse(personal.exempt_client_ip(personal.client_ip('203.0.113.8', {'X-Forwarded-For':'37.193.168.134'}), []))
 
     def test_one_device_selection_and_head(self):
         result = self.create()
@@ -162,10 +173,10 @@ class PersonalTests(unittest.TestCase):
             response = server.personal_operation(route, {'op':'fetch','slug':link['slug'],'device':{'hwid':'phone'}})
         self.assertFalse(any(key.lower() == 'announce' for key in response['headers']))
 
-    def test_missing_hwid_and_client_version_never_claim(self):
-        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_client_version=True))
+    def test_missing_or_ip_hwid_never_claim(self):
+        server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_device_hwid=True))
         result = self.create(); path = self.path + '/' + result['slug']
-        for hdr in ({'X-App-Version': '1.2.3'}, {'X-Hwid': 'A'}, {'X-Forwarded-For': '37.193.168.134'}):
+        for hdr in ({'X-App-Version': '1.2.3'}, {'X-Hwid': 'ip:203.0.113.5'}, {'X-Hwid':'2001:db8::1'}, {'X-Forwarded-For': '37.193.168.134'}):
             _, body, _ = self.request(path, hdr)
             self.assertIn('blocked.invalid', base64.b64decode(body).decode())
             self.assertFalse(server.PERSONAL.access(self.route['id'], result['slug'], token=result['token'])['bound'])

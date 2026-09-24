@@ -815,7 +815,8 @@ class AdminHandler(_Base):
                 dns["regru_username"] = dflt["regru_username"]
                 dns["regru_password_enc"] = dflt["regru_password_enc"]
                 s["sub_public_base"] = dflt.get("public_base", "")
-            s["require_client_version"] = ("require_client_version" in f)
+            s["require_device_hwid"] = ("require_device_hwid" in f)
+            s.pop("require_client_version", None)
             s["failover_enabled"] = ("failover_enabled" in f)
             s["require_quorum"] = ("require_quorum" in f)
             s["preempt"] = ("preempt" in f)
@@ -903,8 +904,8 @@ class SubHandler(_Base):
             subscription_url = base.rstrip('/') + route['path']
             message = personal.OPEN_MESSAGE + '\n\nСсылка подписки: ' + subscription_url
             body, headers = personal.notice('Откройте в браузере', message, output_format)
-        elif STORE.get_settings().get('require_client_version', False) and d['ip'] not in personal.EXEMPT_IPS and not personal.has_version(self.headers):
-            body, headers = personal.notice('Используйте другой VPN-клиент', personal.VERSION_MESSAGE, output_format)
+        elif STORE.get_settings().get('require_device_hwid', True) and not personal.exempt_client_ip(d['ip'], CLUSTER.all_nodes(), CLUSTER.public_ip) and not personal.has_device_hwid(d['hwid']):
+            body, headers = personal.notice('Используйте другой VPN-клиент', personal.HWID_MESSAGE, output_format)
         elif slug:
             try:
                 result = personal_operation(route, {'op': 'fetch', 'slug': slug, 'device': d, 'format': output_format, 'claim': self.command != 'HEAD'})

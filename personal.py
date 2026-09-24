@@ -19,7 +19,7 @@ import urllib.request
 import subscriptions as subs
 
 EXEMPT_IPS = {"37.193.168.134", "90.189.209.31"}
-VERSION_MESSAGE = "Ваш VPN-клиент не передаёт версию приложения. Используйте другой VPN-клиент, например Happ."
+HWID_MESSAGE = "Ваш VPN-клиент не передаёт корректный HWID устройства или использует IP вместо него. Используйте другой VPN-клиент, например Happ."
 OPEN_MESSAGE = "Откройте ссылку подписки в браузере, чтобы получить личную ссылку для одного устройства."
 DEVICE_MESSAGE = "Эта ссылка уже используется на другом устройстве. Откройте основную ссылку в браузере и создайте свою личную подписку."
 DEVICE_REQUIRED = "Для личной подписки нужен VPN-клиент, передающий ID устройства (HWID). Используйте, например, Happ."
@@ -55,9 +55,47 @@ def client_ip(peer, headers):
     return chain[0] if chain else peer
 
 
-def has_version(headers):
-    value = headers.get('X-App-Version', '').strip()
-    return len(value) <= 120 and bool(re.search(r'\d+(?:\.\d+)+', value))
+def has_device_hwid(value):
+    """Reject empty identifiers, IP fallback markers, and embedded IPv4/IPv6."""
+    value = (value or '').strip()
+    if not value or len(value) > 256 or 'ip' in value.lower():
+        return False
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        return False
+    if re.search(r'(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])', value):
+        return False
+    # Try colon-containing substrings to catch prefixed/bracketed IPv6 addresses.
+    for match in re.finditer(r'[0-9a-fA-F:.]+', value):
+        text = match.group()
+        if ':' not in text:
+            continue
+        for start in range(len(text)):
+            for end in range(start + 2, len(text) + 1):
+                candidate = text[start:end]
+                if candidate.count(':') < 2:
+                    continue
+                try:
+                    ipaddress.ip_address(candidate)
+                    return False
+                except ValueError:
+                    pass
+    return True
+
+
+def normalized_ip(value):
+    try:
+        address = ipaddress.ip_address(str(value or '').strip())
+        return str(address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else str(address)
+    except ValueError:
+        return None
+
+
+def exempt_client_ip(ip, nodes, own_ip=''):
+    exempt = {normalized_ip(value) for value in EXEMPT_IPS}
+    exempt.add(normalized_ip(own_ip))
+    exempt.update(normalized_ip(node.get('public_ip')) for node in nodes)
+    exempt.discard(None)
+    return normalized_ip(ip) in exempt
 
 
 def notice(name, message, output_format='legacy'):

@@ -588,8 +588,8 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
   <div id="coolify" style="margin-top:12px"></div>
 </fieldset>
 <fieldset><legend>Защита подписок</legend>
-  <label class="row"><input type="checkbox" name="require_client_version" value="1" style="width:auto"{chk(settings.get('require_client_version', False))}> <span>Блокировать VPN-клиенты без версии приложения</span></label>
-  <div class="help">По умолчанию выключено для совместимости с Happ и другими клиентами. Включайте только если ваши клиенты передают X-App-Version. Настройка действует на общественные и личные подписки и синхронизируется между узлами. Привязка личных ссылок к одному устройству остаётся включённой.</div>
+  <label class="row"><input type="checkbox" name="require_device_hwid" value="1" style="width:auto"{chk(settings.get('require_device_hwid', True))}> <span>Требовать HWID устройства без IP</span></label>
+  <div class="help">По умолчанию включено. Клиент должен передавать X-Hwid без IP-адресов и текста «ip». Версия приложения не проверяется. Исключения: публичные IP всех узлов кластера, 37.193.168.134 и 90.189.209.31. Настройка синхронизируется между узлами. Привязка личных ссылок к одному устройству остаётся отдельной проверкой.</div>
 </fieldset>
 <fieldset><legend>Фейловер</legend>
   <label class="row"><input type="checkbox" name="failover_enabled" value="1" style="width:auto"{chk(settings.get('failover_enabled'))}> <span>Авто-фейловер включён</span></label>

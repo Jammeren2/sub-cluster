@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     # device = X-Hwid, а для клиентов без HWID — "ip:<адрес>".
     "blocked_devices": [],
     "settings": {
-        "require_client_version": False,  # совместимость с клиентами без X-App-Version
+        "require_device_hwid": True,  # HWID без IP; версия клиента не требуется
         "failover_enabled": True,
         "require_quorum": True,   # авто-захват мёртвого активного — только при кворуме
         "preempt": True,          # узел с лучшим приоритетом возвращает себе DNS (failback)
