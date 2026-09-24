@@ -132,9 +132,14 @@ def personal_operation(route, payload, remote=False):
     if op == "fetch":
         # Claim only after materializing the subscription. Transaction rechecks races.
         details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=payload.get("claim", True) and any(item["id"] in details["selected"] for item in items))
-        body, headers = personal.selected_response(items, details["selected"], headers, payload.get("format", "legacy"), details["name"])
+        title = (route.get("title") or route["path"]) + " ● Личная"
+        body, headers = personal.selected_response(items, details["selected"], headers, payload.get("format", "legacy"), title)
         if any(item['id'] in details['selected'] for item in items):
-            headers['Announce'] = subs._b64_header("Личная подписка: 1 ссылка = 1 устройство. Создано для защиты от ботов. " + route.get('announce', ''))
+            # Never inherit an upstream announcement when the route description is empty.
+            headers = {key: value for key, value in headers.items() if key.lower() != 'announce'}
+            announce = (route.get('announce') or '').strip()
+            if announce:
+                headers['Announce'] = subs._b64_header(announce)
         return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers}
     return {"ok": True, "items": [{"id": item["id"], "name": item["name"]} for item in items],
             "configured": bool(os.environ.get('TURNSTILE_SITE_KEY') and os.environ.get('TURNSTILE_SECRET_KEY')),

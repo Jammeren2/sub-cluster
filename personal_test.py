@@ -143,6 +143,25 @@ class PersonalTests(unittest.TestCase):
         self.assertNotEqual(body, denied)
         self.assertIn('другом устройстве', base64.b64decode(headers['Announce'][7:]).decode())
 
+    def test_personal_title_and_route_only_announcement(self):
+        link = self.create()
+        path = self.path + '/' + link['slug']
+        hdr = {'X-Hwid': 'phone', 'X-App-Version': '1.2.3'}
+        for fmt in ('happ', 'clash'):
+            graph.update_route(server.STORE, self.route['id'], title='Мой VPN', announce='Поддержка: @support')
+            _, _, headers = self.request(path + '?format=' + fmt, hdr)
+            self.assertEqual(base64.b64decode(headers['Profile-Title'][7:]).decode(), 'Мой VPN ● Личная')
+            self.assertEqual(base64.b64decode(headers['Announce'][7:]).decode(), 'Поддержка: @support')
+            graph.update_route(server.STORE, self.route['id'], announce='')
+            _, _, headers = self.request(path + '?format=' + fmt, hdr)
+            self.assertNotIn('Announce', headers)
+        # Upstream metadata must not replace an empty route description.
+        route = graph.get_routes(server.STORE)[0]
+        body = subs._b64list([item['value'] for item in self.catalog])
+        with patch('sub_server.subs.build_route_response', return_value=(body, {'announce': 'upstream text'})):
+            response = server.personal_operation(route, {'op':'fetch','slug':link['slug'],'device':{'hwid':'phone'}})
+        self.assertFalse(any(key.lower() == 'announce' for key in response['headers']))
+
     def test_missing_hwid_and_client_version_never_claim(self):
         server.STORE.update_config(lambda cfg: cfg.setdefault('settings', {}).update(require_client_version=True))
         result = self.create(); path = self.path + '/' + result['slug']
