@@ -197,7 +197,7 @@
     const trustLabel=el('label'); const trust=el('input'); trust.type='checkbox'; trust.style.width='auto'; trust.checked=!!s.unsafe; trust.disabled=s.url==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';
     trust.addEventListener('change',()=>{s.unsafe=trust.checked;checkHelp.hidden=!s.unsafe;markDirty();});
     trustLabel.append(trust,document.createTextNode(' Небезопасный источник · проверять серверы'));bd.appendChild(trustLabel);
-    const checkHelp=el('div','hint','В подписку попадут только проверенные серверы. Проверяем по одному, страну определяем через VPN. Счётчики обновляются при перезагрузке страницы.');checkHelp.hidden=!s.unsafe;bd.appendChild(checkHelp);
+    const checkHelp=el('div','hint','В подписку попадут только проверенные серверы. Проверяем параллельно с ограничением нагрузки, страну определяем через VPN. Счётчики обновляются при перезагрузке страницы.');checkHelp.hidden=!s.unsafe;bd.appendChild(checkHelp);
     url.addEventListener('input',()=>{trust.disabled=url.value.trim()==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';if(trust.disabled){s.unsafe=true;trust.checked=true;}checkHelp.hidden=!s.unsafe;});
     if(s.check_status){const st=s.check_status;bd.appendChild(el('div','hint',st.error||('Работают: '+st.working+' / '+st.total+' · ожидают: '+st.pending+' · ошибки: '+st.failed+' · не поддержаны: '+st.unsupported)));}
     // переименование отдельных ссылок внутри подписки

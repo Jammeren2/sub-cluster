@@ -56,7 +56,8 @@ services:
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
       CACHE_TTL: "${CACHE_TTL:-10800}"
       MIHOMO_BIN: "${MIHOMO_BIN:-/opt/mihomo/mihomo}"
-      SOURCE_CHECK_INTERVAL: "${SOURCE_CHECK_INTERVAL:-10}"
+      SOURCE_CHECK_WORKERS: "${SOURCE_CHECK_WORKERS:-4}"
+      SOURCE_CHECK_PAUSE: "${SOURCE_CHECK_PAUSE:-0.2}"
       # Применять обход к egress (та же ZAPRET=true + cap_add ниже). off = только baseline.
       ZAPRET_ENABLE_APPLY: "${ZAPRET:-false}"
     volumes:

@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import tempfile
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest.mock import patch
 
@@ -128,6 +130,53 @@ class SourceChecksTests(unittest.TestCase):
         with patch.object(checks, 'probe', side_effect=TimeoutError):
             self.checker.check_one(self.url)
         self.assertEqual(subs.extract_links(self.checker.body(self.url)[0]), [])
+
+    def test_atomic_claims_and_crash_recovery(self):
+        self.checker.ingest(self.url, VLESS.encode())
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            rows = list(pool.map(lambda _: self.checker.next_link(self.url, claim=True), range(8)))
+        self.assertEqual(sum(row is not None for row in rows), 1)
+        with self.checker.connect() as db:
+            db.execute('UPDATE checked_links SET lease_until=?', (time.time() - 1,))
+        self.assertIsNotNone(checks.Checker(self.path, self.store).next_link(self.url, claim=True))
+
+    def test_parallel_scheduler_refills_without_waiting_for_slow_probe(self):
+        links = [VLESS.replace('vpn.example', f'vpn{i}.example') for i in range(6)]
+        self.checker.ingest(self.url, '\n'.join(links).encode())
+        self.store.update_config(lambda cfg: cfg.update(sources=[{'url':self.url,'unsafe':True}]))
+        lock, release = threading.Lock(), threading.Event()
+        started, peak, running = [], [0], [0]
+        first_batch, refilled = threading.Event(), threading.Event()
+        def fake_probe(link):
+            with lock:
+                started.append(link)
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+                if len(started) >= 3:
+                    first_batch.set()
+                if len(started) >= 4:
+                    refilled.set()
+            try:
+                if 'vpn0.example' in link:
+                    release.wait(5)
+                else:
+                    first_batch.wait(5)
+                return {'country':'NL','exit_ip':'1.1.1.1'}
+            finally:
+                with lock:
+                    running[0] -= 1
+        with patch.object(checks, 'WORKERS', 3), patch.object(checks, 'PAUSE', .01), patch.object(checks, 'probe', side_effect=fake_probe), patch.object(self.checker, 'refresh'):
+            self.checker.start()
+            try:
+                self.assertTrue(first_batch.wait(3))
+                self.assertTrue(refilled.wait(3), 'slow first probe blocked the queue')
+                self.assertEqual(peak[0], 3)
+            finally:
+                self.checker.stop.set()
+                release.set()
+                self.checker.thread.join(5)
+        self.assertFalse(self.checker.thread.is_alive())
+        self.assertEqual(len(started), len(set(started)))
 
     def test_auto_seed_once_and_empty_unsafe_source(self):
         self.checker.seed_public_source()

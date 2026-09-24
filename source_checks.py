@@ -4,6 +4,7 @@ No direct fallback; raw feed credentials never go to the portal or checker logs.
 """
 import base64
 import collections
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 import html
@@ -31,7 +32,9 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_LINKS = 100000
 REFRESH = 6 * 3600
 TTL = 72 * 3600
-INTERVAL = max(5, int(os.environ.get('SOURCE_CHECK_INTERVAL', '10')))
+WORKERS = max(1, min(16, int(os.environ.get('SOURCE_CHECK_WORKERS', '4'))))
+PAUSE = max(0.05, min(60, float(os.environ.get('SOURCE_CHECK_PAUSE', '0.2'))))
+LEASE_SECONDS = 120
 
 
 def is_unsafe(source):
@@ -193,6 +196,9 @@ class Checker:
         with self.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS checked_sources(url TEXT PRIMARY KEY, refreshed REAL NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT "")')
             db.execute('CREATE TABLE IF NOT EXISTS checked_links(url TEXT, key TEXT, link TEXT, position INTEGER, checked REAL NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT "pending", country TEXT NOT NULL DEFAULT "", exit_ip TEXT NOT NULL DEFAULT "", PRIMARY KEY(url,key))')
+            columns = {r[1] for r in db.execute('PRAGMA table_info(checked_links)')}
+            if 'lease_until' not in columns:
+                db.execute('ALTER TABLE checked_links ADD COLUMN lease_until REAL NOT NULL DEFAULT 0')
             db.execute('CREATE INDEX IF NOT EXISTS checked_queue ON checked_links(url,checked,position)')
 
     @contextmanager
@@ -253,35 +259,46 @@ class Checker:
                 db.execute('INSERT INTO checked_sources(url,refreshed,error) VALUES(?,?,?) ON CONFLICT(url) DO UPDATE SET refreshed=excluded.refreshed,error=excluded.error',
                            (url, time.time() - REFRESH + 600, 'Не удалось обновить список'))
 
-    def next_link(self, url):
+    def next_link(self, url, claim=False):
         with self.connect() as db:
+            if claim:
+                db.execute("BEGIN IMMEDIATE")
+            now = time.time()
             # Every second turn refreshes a working server, so a long first scan
             # cannot leave the published subset unchecked for days.
             row = None
             if self.round % 2:
-                row = db.execute('SELECT * FROM checked_links WHERE url=? AND state="ok" AND checked<? ORDER BY checked LIMIT 1', (url, time.time() - 3600)).fetchone()
+                row = db.execute('SELECT * FROM checked_links WHERE url=? AND state="ok" AND checked<? AND lease_until<? ORDER BY checked LIMIT 1', (url, now - 3600, now)).fetchone()
             if row is None:
-                row = db.execute('SELECT * FROM checked_links WHERE url=? AND checked<? ORDER BY checked,position LIMIT 1', (url, time.time() - 3600)).fetchone()
+                row = db.execute('SELECT * FROM checked_links WHERE url=? AND checked<? AND lease_until<? ORDER BY checked,position LIMIT 1', (url, now - 3600, now)).fetchone()
+            if row is not None and claim:
+                db.execute("UPDATE checked_links SET lease_until=? WHERE url=? AND key=?", (now + LEASE_SECONDS, url, row["key"]))
         self.round += 1
         return dict(row) if row else None
 
     def check_one(self, url):
-        row = self.next_link(url)
-        if not row:
-            return
+        row = self.next_link(url, claim=True)
+        if row:
+            self.check_row(row)
+
+    def check_row(self, row):
         country, exit_ip = '', ''
         try:
-            result = probe(row['link'])
-            country, exit_ip, state = result['country'], result['exit_ip'], 'ok'
-        except RuntimeError:
-            return  # Missing core does not falsely mark all servers as dead.
-        except ValueError as exc:
-            state = 'unsupported' if str(exc).startswith('unsupported') else 'failed'
-        except Exception:
-            state = 'failed'
-        with self.connect() as db:
-            db.execute('UPDATE checked_links SET checked=?,state=?,country=?,exit_ip=? WHERE url=? AND key=?',
-                       (time.time(), state, country, exit_ip, url, row['key']))
+            try:
+                result = probe(row['link'])
+                country, exit_ip, state = result['country'], result['exit_ip'], 'ok'
+            except RuntimeError:
+                return  # Missing core does not falsely mark all servers as dead.
+            except ValueError as exc:
+                state = 'unsupported' if str(exc).startswith('unsupported') else 'failed'
+            except Exception:
+                state = 'failed'
+            with self.connect() as db:
+                db.execute('UPDATE checked_links SET checked=?,state=?,country=?,exit_ip=? WHERE url=? AND key=?',
+                           (time.time(), state, country, exit_ip, row['url'], row['key']))
+        finally:
+            with self.connect() as db:
+                db.execute('UPDATE checked_links SET lease_until=0 WHERE url=? AND key=?', (row['url'], row['key']))
 
     def body(self, url):
         with self.connect() as db:
@@ -299,24 +316,47 @@ class Checker:
                 'error': ('Нужны mihomo и curl на этом узле' if not core_path() or not shutil.which('curl') else (source['error'] if source else ''))}
 
     def run(self):
-        cursor = 0
-        while not self.stop.is_set():
-            try:
-                urls = list(dict.fromkeys(s.get('url', '').strip() for s in self.store.get_config().get('sources', []) if is_unsafe(s) and s.get('url')))
-                if urls:
-                    url = urls[cursor % len(urls)]
-                    cursor += 1
-                    self.refresh(url)
-                    self.check_one(url)
-                # GC credentials of removed sources.
-                with self.connect() as db:
-                    existing = [r[0] for r in db.execute('SELECT url FROM checked_sources')]
-                    for old in set(existing) - set(urls):
-                        db.execute('DELETE FROM checked_links WHERE url=?', (old,))
-                        db.execute('DELETE FROM checked_sources WHERE url=?', (old,))
-            except Exception:
-                pass  # transient config/SQLite failures must not kill the worker
-            self.stop.wait(INTERVAL)
+        cursor, refresh_cursor = 0, 0
+        # Separate refresh executor: a slow feed download must not stall probes.
+        with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='vpn-probe') as pool, ThreadPoolExecutor(max_workers=1, thread_name_prefix='feed-refresh') as refresh_pool:
+            active, refreshing = set(), None
+            while not self.stop.is_set():
+                try:
+                    for future in list(active):
+                        if future.done():
+                            active.remove(future)
+                            try:
+                                future.result()
+                            except Exception:
+                                pass  # lease expiry recovers transient SQLite failures
+                    urls = list(dict.fromkeys(s.get('url', '').strip() for s in self.store.get_config().get('sources', []) if is_unsafe(s) and s.get('url')))
+                    if refreshing is None or refreshing.done():
+                        if refreshing is not None:
+                            finished, refreshing = refreshing, None
+                            finished.result()
+                        if urls:
+                            refreshing = refresh_pool.submit(self.refresh, urls[refresh_cursor % len(urls)])
+                            refresh_cursor += 1
+                    # Round-robin sources, immediately refill each completed slot.
+                    for _ in range(WORKERS - len(active)):
+                        row = None
+                        for _ in urls:
+                            url = urls[cursor % len(urls)]
+                            cursor += 1
+                            row = self.next_link(url, claim=True)
+                            if row:
+                                break
+                        if not row:
+                            break
+                        active.add(pool.submit(self.check_row, row))
+                    with self.connect() as db:
+                        existing = [r[0] for r in db.execute('SELECT url FROM checked_sources')]
+                        for old in set(existing) - set(urls):
+                            db.execute('DELETE FROM checked_links WHERE url=?', (old,))
+                            db.execute('DELETE FROM checked_sources WHERE url=?', (old,))
+                except Exception:
+                    pass
+                self.stop.wait(PAUSE)
 
     def seed_public_source(self):
         """One-time disconnected source; never changes existing route outputs."""
