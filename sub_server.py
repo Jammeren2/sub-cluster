@@ -23,6 +23,8 @@ import hmac
 import socket
 import secrets
 import ipaddress
+import base64
+import hashlib
 import threading
 import urllib.parse
 import urllib.error
@@ -37,6 +39,8 @@ import webui
 import zapret
 import gateway
 import provision
+import personal
+import portal
 
 # ── окружение ──────────────────────────────────────────────────────────────
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
@@ -54,6 +58,88 @@ LEGACY_PROFILE_TITLE = os.environ.get("PROFILE_TITLE", "")
 
 STORE = storemod.Store(origin=clustermod.NODE_ID)
 CLUSTER = clustermod.Cluster(STORE)
+PERSONAL = personal.Registry(storemod.DB_FILE)
+_PORTAL_SECRET = (clustermod.CLUSTER_SECRET or secrets.token_urlsafe(32)).encode()
+
+def portal_csrf(route, host, stamp=None):
+    stamp = str(int(time.time()) if stamp is None else stamp)
+    message = (route["id"] + "|" + host + "|" + stamp).encode()
+    return stamp + "." + hmac.new(_PORTAL_SECRET, message, hashlib.sha256).hexdigest()
+
+
+def valid_portal_csrf(token, route, host):
+    try:
+        stamp = token.split(".", 1)[0]
+        return 0 <= time.time() - int(stamp) <= 3600 and hmac.compare_digest(token, portal_csrf(route, host, stamp))
+    except (ValueError, TypeError):
+        return False
+
+
+def personal_operation(route, payload, remote=False):
+    """Forward to the fixed owner; never create a competing local registry."""
+    owner = route.get("personal_owner")
+    if not owner:
+        raise personal.PersonalError("Администратору нужно сохранить личный маршрут ещё раз.", 503)
+    if owner != CLUSTER.id:
+        if remote:
+            raise personal.PersonalError("Настройки кластера обновляются. Повторите позже.", 503)
+        node = CLUSTER.find_node(owner)
+        base = CLUSTER._peer_base(node) if node else None
+        if not base:
+            raise personal.PersonalError("Сервер личных подписок недоступен. Попробуйте позже.", 503)
+        try:
+            result = CLUSTER._http(base, "/cluster/personal", method="POST", payload={**payload, "route_id": route["id"]}, timeout=60)
+        except Exception:
+            raise personal.PersonalError("Сервер личных подписок недоступен. Попробуйте позже.", 503)
+        if not result.get("ok"):
+            raise personal.PersonalError(result.get("error", "Ошибка личной подписки"), result.get("status", 503))
+        return result
+    op = payload.get("op")
+    slug = str(payload.get("slug") or "")
+    if op not in ("catalog", "create", "manage", "update", "fetch"):
+        raise personal.PersonalError("Неизвестное действие.")
+    if op != "fetch":
+        PERSONAL.limit(op + ":" + str(payload.get("ip", "")), 12 if op == "create" else 300)
+    details = None
+    if op in ("manage", "update"):
+        details = PERSONAL.access(route["id"], slug, token=payload.get("token") or "")
+    if op == "fetch":
+        device = payload.get("device") or {}
+        if STORE.is_device_blocked(route["id"], device.get("hwid", ""), device.get("ip", "")):
+            body, headers = subs.build_blocked_response(payload.get("format", "legacy"))
+            return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers}
+        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=False)
+    if op == "create":
+        personal.verify_turnstile(payload.get("captcha"), payload.get("hostname", ""))
+        # Reserve only suffixes that cannot shadow another configured route.
+        candidate = route["path"].rstrip('/') + '/' + str(payload.get("slug") or "")
+        for other in graph.get_routes(STORE):
+            if other["path"] == candidate or other["path"].startswith(candidate + '/'):
+                raise personal.PersonalError("Это название занято другим маршрутом.", 409)
+    spec = graph.resolve_links_spec(STORE, route)
+    # Normalize mirrors through the merger so JSON and base64 catalogs have one shape.
+    body, headers = subs.build_route_response({**route, "mode": "merge"}, spec, route.get("announce", ""))
+    items = personal.catalog(body)
+    if op in ("create", "update"):
+        selected = payload.get("selected")
+        valid = {item["id"] for item in items}
+        if not isinstance(selected, list) or not selected or len(selected) > 1000 or any(not isinstance(x, str) or x not in valid for x in selected):
+            raise personal.PersonalError("Выберите доступные серверы. Если список изменился, обновите страницу.")
+        selected = list(dict.fromkeys(selected))
+        if op == "create":
+            return {"ok": True, **PERSONAL.create(route["id"], payload.get("name"), slug, selected)}
+        details = PERSONAL.access(route["id"], slug, token=payload.get("token") or "", selected=selected)
+    if op == "fetch":
+        # Claim only after materializing the subscription. Transaction rechecks races.
+        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=payload.get("claim", True) and any(item["id"] in details["selected"] for item in items))
+        body, headers = personal.selected_response(items, details["selected"], headers, payload.get("format", "legacy"), details["name"])
+        if any(item['id'] in details['selected'] for item in items):
+            headers['Announce'] = subs._b64_header("Личная подписка: 1 ссылка = 1 устройство. Создано для защиты от ботов. " + route.get('announce', ''))
+        return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers}
+    return {"ok": True, "items": [{"id": item["id"], "name": item["name"]} for item in items],
+            "configured": bool(os.environ.get('TURNSTILE_SITE_KEY') and os.environ.get('TURNSTILE_SECRET_KEY')),
+            **(details or {})}
+
 
 # ── сессии ─────────────────────────────────────────────────────────────────
 _sessions_lock = threading.Lock()
@@ -314,7 +400,7 @@ class _Base(BaseHTTPRequestHandler):
 
     # peer-API кластера (HMAC). Обслуживается и на cluster-порту, и на admin-порту
     # (чтобы узлы ходили друг к другу через статичный admin-домен по 443).
-    CLUSTER_API_PATHS = ("/cluster/ping", "/cluster/members", "/cluster/stats")
+    CLUSTER_API_PATHS = ("/cluster/ping", "/cluster/members", "/cluster/stats", "/cluster/personal")
 
     @staticmethod
     def is_cluster_api(path):
@@ -324,7 +410,19 @@ class _Base(BaseHTTPRequestHandler):
         if not CLUSTER.verify(self.headers.get, path, body):
             self._respond(401, b"unauthorized")
             return
-        if path == "/cluster/ping":
+        if path == "/cluster/personal":
+            try:
+                payload = json.loads(body)
+                route = next((r for r in graph.get_routes(STORE) if r["id"] == payload.get("route_id") and r.get("enabled", True) and r.get("access") == "private"), None)
+                if not route:
+                    raise personal.PersonalError("Личный маршрут недоступен.", 404)
+                result = personal_operation(route, payload, remote=True)
+            except personal.PersonalError as e:
+                result = {"ok": False, "error": str(e), "status": e.status}
+            except Exception:
+                result = {"ok": False, "error": "Личный сервис временно недоступен.", "status": 503}
+            self._json(200, result)
+        elif path == "/cluster/ping":
             self._json(200, CLUSTER.ping_view())
         elif path == "/cluster/members":
             self._json(200, CLUSTER.members_doc())
@@ -432,7 +530,7 @@ class AdminHandler(_Base):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
 
         # peer-API кластера (POST, через admin-домен по 443) — HMAC, до сессии.
-        if path in ("/cluster/reset-stats", "/cluster/redeploy"):
+        if path in ("/cluster/reset-stats", "/cluster/redeploy", "/cluster/personal"):
             self._serve_cluster_api(path, self._read_body())
             return
 
@@ -513,7 +611,7 @@ class AdminHandler(_Base):
             form = self._read_form()
             p = form.get("path", [""])[0].strip()
             did = form.get("domain_id", [""])[0].strip()
-            err = graph.validate_route_path(STORE, p, domain_id=did)
+            err = graph.validate_route_path(STORE, p, domain_id=did, access=form.get("access", ["public"])[0])
             if err:
                 self._html(400, webui.render_classic(graph.get_routes(STORE), sub_public_base(),
                                                      err, True, domains=domains_for_ui()))
@@ -521,7 +619,7 @@ class AdminHandler(_Base):
             graph.add_route(STORE, p, form.get("title", [""])[0].strip(),
                             graph.parse_upstreams(form.get("upstreams", [""])[0]),
                             form.get("mode", ["merge"])[0].strip(),
-                            announce=form.get("announce", [""])[0], domain_id=did)
+                            announce=form.get("announce", [""])[0], domain_id=did, access=form.get("access", ["public"])[0])
             self._redirect("/classic")
             return
 
@@ -535,7 +633,7 @@ class AdminHandler(_Base):
             form = self._read_form()
             p = form.get("path", [""])[0].strip()
             did = form.get("domain_id", [""])[0].strip()
-            err = graph.validate_route_path(STORE, p, ignore_id=rid, domain_id=did)
+            err = graph.validate_route_path(STORE, p, ignore_id=rid, domain_id=did, access=form.get("access", ["public"])[0])
             if err:
                 self._html(400, webui.render_classic(graph.get_routes(STORE), sub_public_base(),
                                                      err, True, domains=domains_for_ui()))
@@ -544,7 +642,7 @@ class AdminHandler(_Base):
                                mode=form.get("mode", ["merge"])[0].strip(),
                                upstreams=graph.parse_upstreams(form.get("upstreams", [""])[0]),
                                announce=form.get("announce", [""])[0],
-                               domain_id=did, enabled=("enabled" in form))
+                               domain_id=did, enabled=("enabled" in form), access=form.get("access", ["public"])[0])
             self._redirect("/classic")
             return
 
@@ -727,58 +825,101 @@ class AdminHandler(_Base):
 # ── sub-сервер (отдача подписок) ───────────────────────────────────────────
 class SubHandler(_Base):
     def _device(self):
-        ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-              or self.headers.get("X-Real-IP") or self.client_address[0])
         return {
-            "ip": ip,
-            "hwid": self.headers.get("X-Hwid", ""),
+            "ip": personal.client_ip(self.client_address[0], self.headers),
+            "hwid": self.headers.get("X-Hwid", "").strip(),
             "model": self.headers.get("X-Device-Model", ""),
             "app": self.headers.get("X-App-Version", ""),
             "ua": self.headers.get("User-Agent", "-"),
         }
+
+    def _public_route(self):
+        path = self.path.split('?', 1)[0].rstrip('/') or '/'
+        route = graph.find_route(STORE, path, host=self._req_host())
+        if route:
+            return route, ''
+        parent, _, slug = path.rpartition('/')
+        if re.fullmatch(r'[A-Za-z0-9_-]{4,64}', slug):
+            route = graph.find_route(STORE, parent, host=self._req_host())
+            if route and route.get('access') == 'private':
+                return route, slug
+        return None, ''
+
+    def do_POST(self):
+        route, slug = self._public_route()
+        if not route or route.get('access') != 'private':
+            self._respond(404, b'not found')
+            return
+        try:
+            if int(self.headers.get('Content-Length', '0')) > 65536:
+                self.close_connection = True
+                raise personal.PersonalError('Слишком большой запрос.', 413)
+            if not valid_portal_csrf(self.headers.get('X-Portal-CSRF', ''), route, self._req_host()):
+                raise personal.PersonalError('Обновите страницу и повторите запрос.', 403)
+            payload = self._read_json()
+            if not isinstance(payload, dict):
+                raise personal.PersonalError('Некорректный запрос.')
+            if payload.get('op') not in ('catalog', 'create', 'manage', 'update'):
+                raise personal.PersonalError('Неизвестное действие.')
+            payload['ip'] = self._device()['ip']
+            payload['hostname'] = urllib.parse.urlsplit('//' + self._req_host()).hostname or ''
+            result = personal_operation(route, payload)
+            self._respond(200, json.dumps(result, ensure_ascii=False), {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'})
+        except personal.PersonalError as e:
+            self._respond(e.status, json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False), {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store'})
+        except Exception:
+            self._json(503, {'ok': False, 'error': 'Сервис временно недоступен. Попробуйте позже.'})
 
     def do_GET(self):
         raw_path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if raw_path == "/healthz":
             self._respond(200, b"ok")
             return
-        route = graph.find_route(STORE, raw_path, host=self._req_host())
-        if route:
-            d = self._device()
-            print(f"[{self.log_date_time_string()}] DEVICE ip={d['ip']} hwid={d['hwid'] or '-'} "
-                  f"model={d['model'] or '-'} app={d['app'] or '-'} ua=\"{d['ua']}\"", flush=True)
-            output_format = subs.select_output_format(
-                self.path, self.headers.get("User-Agent", ""), self.headers.get("Accept", ""))
-            if STORE.is_device_blocked(route["id"], d["hwid"], d["ip"]):
-                try:
-                    STORE.record_device(route["id"], d["hwid"], d["model"], d["app"], d["ip"])
-                except Exception:
-                    pass
-                body, headers = subs.build_blocked_response(output_format)
-                self._respond(200, body, headers)
-                return
-            spec = graph.resolve_links_spec(STORE, route)
-            announce = route.get("announce", "")
-            try:
-                body, headers = subs.build_route_response(
-                    route, spec, announce, output_format=output_format)
-            except urllib.error.HTTPError as e:
-                self._respond(502, f"upstream HTTP {e.code}".encode())
-            except Exception as e:
-                self._respond(502, f"upstream error: {e}".encode())
-            else:
-                try:
-                    STORE.record_device(route["id"], d["hwid"], d["model"], d["app"], d["ip"])
-                except Exception:
-                    pass
-                self._respond(200, body, headers)
+        route, slug = self._public_route()
+        if not route:
+            self._respond(404, b"not found")
             return
-        self._respond(404, b"not found")
+        d = self._device()
+        output_format = subs.select_output_format(self.path, self.headers.get("User-Agent", ""), self.headers.get("Accept", ""))
+        if route.get('access') == 'private' and 'text/html' in self.headers.get('Accept', '').lower():
+            page = portal.render(route, portal_csrf(route, self._req_host()), os.environ.get('TURNSTILE_SITE_KEY', ''), slug)
+            self._respond(200, page, {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
+            return
+        if STORE.is_device_blocked(route["id"], d["hwid"], d["ip"]):
+            body, headers = subs.build_blocked_response(output_format)
+        elif route.get('access') == 'private' and not slug:
+            body, headers = personal.notice('Откройте в браузере', personal.OPEN_MESSAGE, output_format)
+        elif d['ip'] not in personal.EXEMPT_IPS and not personal.has_version(self.headers):
+            body, headers = personal.notice('Используйте другой VPN-клиент', personal.VERSION_MESSAGE, output_format)
+        elif slug:
+            try:
+                result = personal_operation(route, {'op': 'fetch', 'slug': slug, 'device': d, 'format': output_format, 'claim': self.command != 'HEAD'})
+                body, headers = base64.b64decode(result['body']), result['headers']
+            except personal.PersonalError as e:
+                body, headers = personal.notice('Личная подписка недоступна', str(e), output_format)
+            except Exception:
+                body, headers = personal.notice('Попробуйте позже', 'Сервис временно недоступен. Обновите подписку позже.', output_format)
+        else:
+            try:
+                body, headers = subs.build_route_response(route, graph.resolve_links_spec(STORE, route), route.get('announce', ''), output_format=output_format)
+            except Exception:
+                self._respond(502, b'upstream temporarily unavailable')
+                return
+        if self.command != 'HEAD':
+            try:
+                STORE.record_device(route['id'], d['hwid'], d['model'], d['app'], d['ip'])
+            except Exception:
+                pass
+        headers = {**headers, "Cache-Control": "no-store", "Vary": "Accept, User-Agent, X-App-Version, X-Hwid"}
+        self._respond(200, body, headers)
 
     do_HEAD = do_GET
 
+    def log_message(self, fmt, *args):
+        # Do not put personal bearer subscription URLs in application logs.
+        print(f"[{self.log_date_time_string()}] SUB {self.command} {args[1] if len(args) > 1 else ''}")
 
-# ── cluster-сервер (peer-API, HMAC) ────────────────────────────────────────
+
 class ClusterHandler(_Base):
     def _serve(self):
         path = self.path.split("?", 1)[0]

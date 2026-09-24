@@ -851,13 +851,15 @@ def find_route(store, path, host=None):
 
 
 # ── запись через Store ────────────────────────────────────────────────────
-def add_route(store, path, title, upstreams, mode, announce="", domain_id=""):
+def add_route(store, path, title, upstreams, mode, announce="", domain_id="", access="public"):
     def mut(cfg):
         _ensure_keys(cfg)
         cfg["routes"].append({
             "id": _new_id(), "path": normalize_path(path), "title": title,
             "upstreams": upstreams, "mode": mode, "enabled": True,
             "domain_id": domain_id or "",
+            "access": "private" if access == "private" else "public",
+            "personal_owner": store.origin if access == "private" else "",
             "announce": _norm_announce(announce),
         })
         sync_graph_from_routes(cfg)
@@ -876,6 +878,10 @@ def update_route(store, route_id, **fields):
                 for k in ("title", "mode", "upstreams", "domain_id"):
                     if k in fields:
                         r[k] = fields[k]
+                if "access" in fields:
+                    r["access"] = "private" if fields["access"] == "private" else "public"
+                    if r["access"] == "private" and not r.get("personal_owner"):
+                        r["personal_owner"] = store.origin
                 if "announce" in fields:
                     r["announce"] = _norm_announce(fields["announce"])
                 if "enabled" in fields:
@@ -902,7 +908,7 @@ def delete_route(store, route_id):
     return changed[0]
 
 
-def validate_route_path(store, path, ignore_id=None, domain_id=""):
+def validate_route_path(store, path, ignore_id=None, domain_id="", access="public"):
     if not path:
         return "Путь не может быть пустым"
     norm = normalize_path(path)
@@ -922,7 +928,12 @@ def validate_route_path(store, path, ignore_id=None, domain_id=""):
     for r in get_routes(store):
         if r.get("id") == ignore_id:
             continue
-        if normalize_path(r.get("path", "")) != norm:
+        other_path = normalize_path(r.get("path", ""))
+        if eff(r.get("domain_id") or "") == cand and (
+                (r.get("access") == "private" and norm.startswith(other_path + "/")) or
+                (access == "private" and other_path.startswith(norm + "/"))):
+            return "Подпуть личного маршрута зарезервирован для пользовательских ссылок"
+        if other_path != norm:
             continue
         if eff(r.get("domain_id") or "") == cand:
             return f"Путь {norm} уже занят другим маршрутом на этом домене"
@@ -974,6 +985,7 @@ def save_graph(store, data):
             "x": _num(s.get("x"), 80.0), "y": _num(s.get("y"), 80.0),
         })
 
+    current_routes = {r["id"]: r for r in get_routes(store)}
     routes, route_ids, used_paths = [], set(), set()
     for r in raw_routes:
         if not isinstance(r, dict):
@@ -1009,9 +1021,18 @@ def save_graph(store, data):
             "id": rid, "path": path, "title": title, "mode": mode,
             "enabled": enabled, "upstreams": [], "domain_id": did,
             "announce": _norm_announce(r.get("announce")),
+            "access": "private" if r.get("access", current_routes.get(rid, {}).get("access")) == "private" else "public",
+            "personal_owner": current_routes.get(rid, {}).get("personal_owner") or (store.origin if r.get("access", current_routes.get(rid, {}).get("access")) == "private" else ""),
             "x": _num(r.get("x"), 520.0), "y": _num(r.get("y"), 80.0),
         })
 
+    for parent in routes:
+        if parent.get("access") != "private":
+            continue
+        for child in routes:
+            if child["id"] != parent["id"] and _eff_id(child["domain_id"]) == _eff_id(parent["domain_id"]) and child["path"].startswith(parent["path"] + "/"):
+                errors.append("Подпуть личного маршрута зарезервирован для пользовательских ссылок")
+                break
     if errors:
         return False, errors
 

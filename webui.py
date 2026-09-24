@@ -366,6 +366,8 @@ def render_route_card(route, sub_base, domains=None):
     <label>Путь подписки</label><input name="path" value="{path}" class="blur">
     <label>Домен (на каком отдаётся)</label>
     <select name="domain_id">{_domain_options(domains, domain_id)}</select>
+    <label>Доступ к подписке</label><select name="access"><option value="public">Общественная</option><option value="private"{' selected' if route.get("access") == "private" else ''}>Личная · 1 устройство</option></select>
+    <div class="help">Личный режим: 1 ссылка = 1 HWID. Владелец: {esc(route.get("personal_owner") or "текущий узел")}. Нужны доступный владелец и настроенный Turnstile.</div>
     <label>Режим</label>
     <select name="mode">
       <option value="merge"{' selected' if mode != 'mirror' else ''}>Слияние</option>
@@ -404,6 +406,7 @@ def render_classic(routes, sub_base, flash="", flash_err=False, domains=None):
   <label>Путь подписки</label><input name="path" placeholder="/custom/custom" required>
   <label>Домен (на каком отдаётся)</label>
   <select name="domain_id">{_domain_options(domains, "")}</select>
+  <label>Доступ к подписке</label><select name="access"><option value="public">Общественная</option><option value="private">Личная · 1 устройство</option></select>
   <label>Режим</label><select name="mode"><option value="merge">Слияние</option><option value="mirror">Зеркало</option></select>
   <label>Upstream-ссылки (по одной в строке)</label><textarea name="upstreams"></textarea>
   <label>Текст под подпиской (announce)</label><textarea name="announce" placeholder="Бот — @mybot&#10;Поддержка — https://..."></textarea>

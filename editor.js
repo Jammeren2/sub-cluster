@@ -501,6 +501,11 @@
     const t=el('input'); t.value=r.title||''; t.placeholder='Моя подписка'; t.addEventListener('input',()=>{ r.title=t.value; markDirty(); }); bd.appendChild(t);
     bd.appendChild(el('label',null,'Путь подписки'));
     const p=el('input','mono'); p.value=r.path||''; p.placeholder='/custom/custom'; mask(p); bd.appendChild(p);
+    bd.appendChild(el('label',null,'Доступ к подписке'));
+    const access=el('select'); [['public','Общественная'],['private','Личная · 1 устройство']].forEach(([value,label])=>{ const option=el('option',null,label); option.value=value; option.selected=(r.access||'public')===value; access.appendChild(option); });
+    const personalHelp=el('div','cnt');
+    function refreshAccessHelp(){personalHelp.hidden=access.value!=='private';personalHelp.textContent='Личная ссылка = 1 HWID. Владелец: '+(r.personal_owner||'текущий узел')+'. Выдача зависит от доступности владельца; для создания нужен Turnstile.';}
+    access.addEventListener('change',()=>{ r.access=access.value; refreshAccessHelp(); markDirty(); }); bd.appendChild(access); bd.appendChild(personalHelp); refreshAccessHelp();
     bd.appendChild(el('label',null,'Режим'));
     const sel=el('select'); [['merge','Слияние'],['mirror','Зеркало']].forEach(m=>{ const o=el('option',null,m[1]); o.value=m[0]; if((r.mode||'merge')===m[0])o.selected=true; sel.appendChild(o); }); sel.addEventListener('change',()=>{ r.mode=sel.value; markDirty(); }); bd.appendChild(sel);
     // домен (на каком отдаётся) — показываем, только если домены настроены
@@ -620,7 +625,7 @@
     });
     const payload={
       sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',type:s.type||'source',x:Math.round(s.x),y:Math.round(s.y)})),
-      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',enabled:r.enabled!==false,announce:r.announce||'',domain_id:r.domain_id||'',x:Math.round(r.x),y:Math.round(r.y)})),
+      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',access:r.access||'public',enabled:r.enabled!==false,announce:r.announce||'',domain_id:r.domain_id||'',x:Math.round(r.x),y:Math.round(r.y)})),
       edges:G.edges.map(e=>({from:e.from,to:e.to})),
       node_meta:node_meta
     };

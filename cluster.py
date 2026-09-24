@@ -193,7 +193,7 @@ class Cluster:
             return None
         return f"{self.scheme}://{ip}:{port}"
 
-    def _http(self, base, path, method="GET", payload=None):
+    def _http(self, base, path, method="GET", payload=None, timeout=None):
         body = b"" if payload is None else json.dumps(payload).encode("utf-8")
         url = base + path
         req = urllib.request.Request(url, data=(body if method != "GET" else None), method=method)
@@ -202,7 +202,7 @@ class Cluster:
         if method != "GET":
             req.add_header("Content-Type", "application/json")
         ctx = _SSL_CTX if url.lower().startswith("https") else None
-        with urllib.request.urlopen(req, timeout=self.http_timeout, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=self.http_timeout if timeout is None else timeout, context=ctx) as resp:
             raw = resp.read().decode("utf-8", errors="ignore")
         return json.loads(raw) if raw else {}
 
@@ -454,7 +454,7 @@ class Cluster:
             if token:
                 req.add_header("Authorization", "Bearer " + token)
             ctx = _SSL_CTX if url.lower().startswith("https") else None
-            with urllib.request.urlopen(req, timeout=self.http_timeout, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=self.http_timeout if timeout is None else timeout, context=ctx) as resp:
                 code = resp.getcode()
                 resp.read()
             print(f"[cluster] redeploy fired -> {url} HTTP {code}", flush=True)
