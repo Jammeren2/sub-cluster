@@ -41,6 +41,7 @@ import gateway
 import provision
 import personal
 import portal
+import source_checks
 
 # ── окружение ──────────────────────────────────────────────────────────────
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
@@ -59,6 +60,8 @@ LEGACY_PROFILE_TITLE = os.environ.get("PROFILE_TITLE", "")
 STORE = storemod.Store(origin=clustermod.NODE_ID)
 CLUSTER = clustermod.Cluster(STORE)
 PERSONAL = personal.Registry(storemod.DB_FILE)
+SOURCE_CHECKER = source_checks.Checker(storemod.DB_FILE, STORE)
+subs.checked_source_reader = SOURCE_CHECKER.body
 _PORTAL_SECRET = (clustermod.CLUSTER_SECRET or secrets.token_urlsafe(32)).encode()
 
 def portal_csrf(route, host, stamp=None):
@@ -114,7 +117,7 @@ def personal_operation(route, payload, remote=False):
         # Reserve only suffixes that cannot shadow another configured route.
         candidate = route["path"].rstrip('/') + '/' + str(payload.get("slug") or "")
         for other in graph.get_routes(STORE):
-            if other["path"] == candidate or other["path"].startswith(candidate + '/'):
+            if other["path"].casefold() == candidate.casefold() or other["path"].casefold().startswith(candidate.casefold() + '/'):
                 raise personal.PersonalError("Это название занято другим маршрутом.", 409)
     spec = graph.resolve_links_spec(STORE, route)
     # Normalize mirrors through the merger so JSON and base64 catalogs have one shape.
@@ -127,7 +130,7 @@ def personal_operation(route, payload, remote=False):
             raise personal.PersonalError("Выберите доступные серверы. Если список изменился, обновите страницу.")
         selected = list(dict.fromkeys(selected))
         if op == "create":
-            return {"ok": True, **PERSONAL.create(route["id"], payload.get("name"), slug, selected)}
+            return {"ok": True, **PERSONAL.create(route["id"], payload.get("name"), slug, selected, contact=payload.get("contact"))}
         details = PERSONAL.access(route["id"], slug, token=payload.get("token") or "", selected=selected)
     if op == "fetch":
         # Claim only after materializing the subscription. Transaction rechecks races.
@@ -140,8 +143,8 @@ def personal_operation(route, payload, remote=False):
             announce = (route.get('announce') or '').strip()
             if announce:
                 headers['Announce'] = subs._b64_header(announce)
-        return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers, "personal_name": details["name"]}
-    return {"ok": True, "items": [{"id": item["id"], "name": item["name"]} for item in items],
+        return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers, "personal_name": details["name"], "personal_contact": details.get("contact", "")}
+    return {"ok": True, "items": [{"id": item["id"], "name": item["name"], "unsafe": item.get("unsafe", False)} for item in items],
             "configured": bool(os.environ.get('TURNSTILE_SITE_KEY') and os.environ.get('TURNSTILE_SECRET_KEY')),
             **(details or {})}
 
@@ -499,7 +502,12 @@ class AdminHandler(_Base):
             self._html(200, webui.render_login())
             return
         if path == "/":
-            self._html(200, webui.render_editor(graph.get_graph(STORE), sub_public_base(),
+            editor_graph = graph.get_graph(STORE)
+            for source in editor_graph["sources"]:
+                if source_checks.is_unsafe(source):
+                    source["unsafe"] = True
+                    source["check_status"] = SOURCE_CHECKER.status(source.get("url", ""))
+            self._html(200, webui.render_editor(editor_graph, sub_public_base(),
                                                 sess["csrf"], domains=domains_for_ui()))
         elif path == "/classic":
             self._html(200, webui.render_classic(graph.get_routes(STORE), sub_public_base(),
@@ -593,7 +601,8 @@ class AdminHandler(_Base):
                 self._json(400, {"ok": False, "error": why})
                 return
             try:
-                links = subs.preview_subscription(url)
+                unsafe = source_checks.is_unsafe({"url": url}) or any(source_checks.is_unsafe(s) and s.get("url", "").strip() == url for s in STORE.get_config().get("sources", []))
+                links = subs.preview_subscription(url, body=SOURCE_CHECKER.body(url)[0] if unsafe else None)
             except urllib.error.HTTPError as e:
                 self._json(502, {"ok": False, "error": f"upstream HTTP {e.code}"})
             except Exception as e:
@@ -888,6 +897,7 @@ class SubHandler(_Base):
             return
         d = self._device()
         personal_name = ""
+        personal_contact = ""
         output_format = subs.select_output_format(self.path, self.headers.get("User-Agent", ""), self.headers.get("Accept", ""))
         if route.get('access') == 'private' and 'text/html' in self.headers.get('Accept', '').lower():
             page = portal.render(route, portal_csrf(route, self._req_host()), os.environ.get('TURNSTILE_SITE_KEY', ''), slug)
@@ -912,6 +922,7 @@ class SubHandler(_Base):
                 result = personal_operation(route, {'op': 'fetch', 'slug': slug, 'device': d, 'format': output_format, 'claim': self.command != 'HEAD'})
                 body, headers = base64.b64decode(result['body']), result['headers']
                 personal_name = result.get('personal_name', '')
+                personal_contact = result.get('personal_contact', '')
             except personal.PersonalError as e:
                 body, headers = personal.notice('Личная подписка недоступна', str(e), output_format)
             except Exception:
@@ -924,7 +935,7 @@ class SubHandler(_Base):
                 return
         if self.command != 'HEAD':
             try:
-                STORE.record_device(route['id'], d['hwid'], d['model'], d['app'], d['ip'], personal_name=personal_name)
+                STORE.record_device(route['id'], d['hwid'], d['model'], d['app'], d['ip'], personal_name=personal_name, personal_contact=personal_contact)
             except Exception:
                 pass
         headers = {**headers, "Cache-Control": "no-store", "Vary": "Accept, User-Agent, X-App-Version, X-Hwid"}
@@ -1004,6 +1015,9 @@ def main():
             print("[FATAL] SECRET_KEY не задан или нет cryptography — секреты reg.ru хранились бы "
                   "открыто. Задай SECRET_KEY (или ALLOW_PLAINTEXT_SECRETS=1 для локального теста).", flush=True)
             raise SystemExit(1)
+
+    SOURCE_CHECKER.seed_public_source()
+    SOURCE_CHECKER.start()
 
     print(f"[*] Узел: {CLUSTER.id} (ip={CLUSTER.public_ip or '?'}, приоритет={CLUSTER.priority})", flush=True)
     print(f"[*] БД: {storemod.DB_FILE}", flush=True)

@@ -125,13 +125,17 @@ def catalog(body):
     for item in items:
         if not isinstance(item, (str, dict)):
             continue
+        name = (item.get('remarks') or item.get('ps') or 'VPN') if isinstance(item, dict) else subs._frag_name(item)
         raw = json.dumps(item, sort_keys=True, ensure_ascii=False) if isinstance(item, dict) else item
+        if isinstance(item, str) and str(name).startswith('Небезопасный · '):
+            # Exit-country changes must not invalidate an existing selection.
+            raw = subs._apply_name(item, 'Небезопасный').split('#', 1)[0]
+            raw = 'unsafe:' + raw
         key = hashlib.sha256(raw.encode()).hexdigest()[:32]
         if key in seen:
             continue
         seen.add(key)
-        name = (item.get('remarks') or item.get('ps') or 'VPN') if isinstance(item, dict) else subs._frag_name(item)
-        result.append({'id': key, 'name': str(name or 'VPN')[:200], 'value': item})
+        result.append({'id': key, 'name': str(name or 'VPN')[:200], 'value': item, 'unsafe': str(name).startswith('Небезопасный · ')})
     return result[:1000]
 
 
@@ -175,6 +179,10 @@ class Registry:
         self.db_file = db_file
         with self.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS personal_links (route TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, selected TEXT NOT NULL, manage_hash TEXT NOT NULL, device_hash TEXT NOT NULL DEFAULT "", created REAL NOT NULL, PRIMARY KEY(route,slug))')
+            columns = {row[1] for row in db.execute("PRAGMA table_info(personal_links)")}
+            if "contact" not in columns:
+                db.execute("ALTER TABLE personal_links ADD COLUMN contact TEXT NOT NULL DEFAULT ''")
+            db.execute('CREATE INDEX IF NOT EXISTS personal_slug_nocase ON personal_links(route,slug COLLATE NOCASE)')
             db.execute('CREATE TABLE IF NOT EXISTS personal_limits (bucket TEXT PRIMARY KEY, since REAL NOT NULL, count INTEGER NOT NULL)')
 
     @contextmanager
@@ -197,7 +205,10 @@ class Registry:
                 raise PersonalError('Слишком много попыток. Попробуйте через час.', 429)
             db.execute('INSERT INTO personal_limits VALUES(?,?,1) ON CONFLICT(bucket) DO UPDATE SET count=count+1', (bucket, now))
 
-    def create(self, route, name, slug, selected):
+    def create(self, route, name, slug, selected, contact=""):
+        contact = str(contact or '').strip()
+        if len(contact) > 160 or any(ord(c) < 32 or ord(c) == 127 for c in contact):
+            raise PersonalError('Контакт: до 160 символов, без переносов строк.')
         name = str(name or '').strip()
         slug = str(slug or '').strip() or secrets.token_urlsafe(24)
         if not 1 <= len(name) <= 80:
@@ -209,18 +220,25 @@ class Registry:
         try:
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
+                if db.execute('SELECT 1 FROM personal_links WHERE route=? AND slug=? COLLATE NOCASE', (route, slug)).fetchone():
+                    raise PersonalError('Это название ссылки уже занято. Выберите другое.', 409)
                 count = db.execute('SELECT count(*) FROM personal_links WHERE route=?', (route,)).fetchone()[0]
                 if count >= 10000:
                     raise PersonalError('Лимит личных ссылок исчерпан. Обратитесь к администратору.', 409)
-                db.execute('INSERT INTO personal_links(route,slug,name,selected,manage_hash,created) VALUES(?,?,?,?,?,?)', (route,slug,name,json.dumps(selected),digest,time.time()))
+                db.execute('INSERT INTO personal_links(route,slug,name,selected,manage_hash,created,contact) VALUES(?,?,?,?,?,?,?)', (route,slug,name,json.dumps(selected),digest,time.time(),contact))
         except sqlite3.IntegrityError:
             raise PersonalError('Это название ссылки уже занято. Выберите другое.', 409)
-        return {'slug': slug, 'token': token, 'name': name, 'selected': selected}
+        return {'slug': slug, 'token': token, 'name': name, 'contact': contact, 'selected': selected}
 
     def access(self, route, slug, *, token=None, hwid=None, selected=None, claim=True):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT name,selected,manage_hash,device_hash FROM personal_links WHERE route=? AND slug=?', (route, slug)).fetchone()
+            matches = db.execute('SELECT name,selected,manage_hash,device_hash,contact,slug FROM personal_links WHERE route=? AND slug=? COLLATE NOCASE', (route, slug)).fetchall()
+            if len(matches) > 1:
+                raise PersonalError('Названия личных ссылок отличаются только регистром. Обратитесь к администратору.', 409)
+            row = matches[0] if matches else None
+            if row:
+                slug = row[5]
             if not row:
                 raise PersonalError('Личная ссылка не найдена.', 404)
             if token is not None:
@@ -228,7 +246,7 @@ class Registry:
                     raise PersonalError('Нужна секретная ссылка управления, полученная при создании.', 403)
                 if selected is not None:
                     db.execute('UPDATE personal_links SET selected=? WHERE route=? AND slug=?', (json.dumps(selected), route, slug))
-                return {'name': row[0], 'selected': selected if selected is not None else json.loads(row[1]), 'bound': bool(row[3])}
+                return {'name': row[0], 'contact': row[4], 'selected': selected if selected is not None else json.loads(row[1]), 'bound': bool(row[3])}
             if not hwid or len(hwid) > 256:
                 raise PersonalError(DEVICE_REQUIRED, 403)
             digest = hashlib.sha256(hwid.encode()).hexdigest()
@@ -236,4 +254,4 @@ class Registry:
                 raise PersonalError(DEVICE_MESSAGE, 403)
             if not row[3] and claim:
                 db.execute('UPDATE personal_links SET device_hash=? WHERE route=? AND slug=? AND device_hash=""', (digest, route, slug))
-            return {'name': row[0], 'selected': json.loads(row[1]), 'bound': bool(row[3]) or claim}
+            return {'name': row[0], 'contact': row[4], 'selected': json.loads(row[1]), 'bound': bool(row[3]) or claim}

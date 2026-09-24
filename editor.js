@@ -194,6 +194,12 @@
     const lab=el('input'); lab.value=s.label||''; lab.placeholder='необязательно'; lab.addEventListener('input',()=>{ s.label=lab.value; markDirty(); }); bd.appendChild(lab);
     bd.appendChild(el('label',null,'Ссылка-подписка (upstream)'));
     const url=el('input','mono'); url.value=s.url||''; url.placeholder='https://сервер/sub/xxxx'; mask(url); url.addEventListener('input',()=>{ s.url=url.value; markDirty(); }); bd.appendChild(url);
+    const trustLabel=el('label'); const trust=el('input'); trust.type='checkbox'; trust.style.width='auto'; trust.checked=!!s.unsafe; trust.disabled=s.url==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';
+    trust.addEventListener('change',()=>{s.unsafe=trust.checked;checkHelp.hidden=!s.unsafe;markDirty();});
+    trustLabel.append(trust,document.createTextNode(' Небезопасный источник · проверять серверы'));bd.appendChild(trustLabel);
+    const checkHelp=el('div','hint','В подписку попадут только проверенные серверы. Проверяем по одному, страну определяем через VPN. Счётчики обновляются при перезагрузке страницы.');checkHelp.hidden=!s.unsafe;bd.appendChild(checkHelp);
+    url.addEventListener('input',()=>{trust.disabled=url.value.trim()==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';if(trust.disabled){s.unsafe=true;trust.checked=true;}checkHelp.hidden=!s.unsafe;});
+    if(s.check_status){const st=s.check_status;bd.appendChild(el('div','hint',st.error||('Работают: '+st.working+' / '+st.total+' · ожидают: '+st.pending+' · ошибки: '+st.failed+' · не поддержаны: '+st.unsupported)));}
     // переименование отдельных ссылок внутри подписки
     const det=el('details'); det.appendChild(el('summary',null,'Переименовать ссылки'));
     const box=el('div','linkbox');
@@ -624,7 +630,7 @@
       if(Object.keys(e).length) node_meta[s.id]=e;
     });
     const payload={
-      sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',type:s.type||'source',x:Math.round(s.x),y:Math.round(s.y)})),
+      sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',unsafe:!!s.unsafe,type:s.type||'source',x:Math.round(s.x),y:Math.round(s.y)})),
       routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',access:r.access||'public',enabled:r.enabled!==false,announce:r.announce||'',domain_id:r.domain_id||'',x:Math.round(r.x),y:Math.round(r.y)})),
       edges:G.edges.map(e=>({from:e.from,to:e.to})),
       node_meta:node_meta

@@ -188,6 +188,20 @@ _cache = {}
 _cache_inflight = {}
 
 
+# Injected by the server; unsafe feeds never fall back to unverified upstream data.
+checked_source_reader = None
+
+
+def fetch_source(source):
+    if source.get("unsafe"):
+        return checked_source_reader(source["url"]) if checked_source_reader else (b"", {})
+    return fetch_upstream_cached(source["url"])
+
+
+def unsafe_name(name):
+    return name if str(name).startswith("Небезопасный · ") else "Небезопасный · " + (name or "Группа")
+
+
 def fetch_upstream(url):
     req = urllib.request.Request(url, headers=UPSTREAM_HEADERS)
     with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT, context=_SSL_CTX) as resp:
@@ -297,6 +311,25 @@ def _apply_name(link, name):
     """Переписать #fragment ссылки на name (пустое name — не трогаем)."""
     if not name or not name.strip():
         return link
+    if link.lower().startswith("ssr://"):
+        try:
+            raw = link[6:].split("#", 1)[0]
+            raw = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode()
+            head, _, query = raw.partition("/?")
+            params = urllib.parse.parse_qs(query)
+            params["remarks"] = [base64.urlsafe_b64encode(name.strip().encode()).decode().rstrip("=")]
+            raw = head + "/?" + urllib.parse.urlencode(params, doseq=True)
+            link = "ssr://" + base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+        except (ValueError, TypeError):
+            pass
+    if link.lower().startswith("vmess://"):
+        try:
+            raw = link[8:].split("#", 1)[0]
+            value = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+            value["ps"] = name.strip()
+            link = "vmess://" + base64.b64encode(json.dumps(value, ensure_ascii=False).encode()).decode()
+        except (ValueError, TypeError):
+            pass
     return link.split("#", 1)[0] + "#" + urllib.parse.quote(name.strip())
 
 
@@ -699,7 +732,7 @@ def _resolve_group_members(group):
             continue
         renames = (sub or {}).get("renames") or []
         try:
-            body, headers = fetch_upstream_cached(url)
+            body, headers = fetch_source(sub)
         except Exception as e:
             print(f"[-] группа «{group.get('name')}»: апстрим {url} недоступен: {e}", flush=True)
             continue
@@ -739,7 +772,7 @@ def _resolve_group_members(group):
                 skipped.append(_emit(u))
             else:
                 obs.append(ob)
-        configs = [_wrap_as_balancer(obs, group.get("name") or "", group.get("params"))] if obs else []
+        configs = [_wrap_as_balancer(obs, unsafe_name(group.get("name")) if group.get("unsafe") else group.get("name") or "", group.get("params"))] if obs else []
         if skipped:
             schemes = _dedup([l.split("://", 1)[0] for l in skipped if "://" in l])
             print(f"[-] авто-выбор «{group.get('name')}»: {len(skipped)} ссыл. неконвертируемого "
@@ -768,7 +801,7 @@ def _resolve_group_members(group):
     for idx, b in enumerate(buckets):
         obs = members_of[idx]
         if obs:                                      # пустую корзину НЕ эмитим
-            configs.append(_wrap_as_balancer(obs, b.get("name") or "", group.get("params")))
+            configs.append(_wrap_as_balancer(obs, unsafe_name(b.get("name")) if group.get("unsafe") else b.get("name") or "", group.get("params")))
     if skipped:
         schemes = _dedup([l.split("://", 1)[0] for l in skipped if "://" in l])
         print(f"[-] группа «{group.get('name')}»: {len(skipped)} ссыл. неконвертируемого "
@@ -828,7 +861,7 @@ def _router_core(targets_resolved, rules, default_target, p, name):
         obs = _materialize_target_outbounds(tinfo)
         if not obs:
             skipped_total += 1
-            tag_for[tid] = None                   # → direct
+            tag_for[tid] = ("outbound", "block") if tinfo.get("unsafe") else None
             continue
         tagged = []
         for j, ob in enumerate(obs):
@@ -881,7 +914,7 @@ def _router_core(targets_resolved, rules, default_target, p, name):
 
     if skipped_total:
         print(f"[-] роутер «{name}»: {skipped_total} таргет(ов) без конвертируемых "
-              f"outbound'ов → их трафик уходит в direct", flush=True)
+              f"outbound'ов → direct для обычных, block для небезопасных источников", flush=True)
     return outbounds, balancers, rrules, observed, skipped_total
 
 
@@ -993,7 +1026,7 @@ def build_merged_response(route, spec, announce=""):
             continue
         renames = (sub or {}).get("renames") or []
         try:
-            body, headers = fetch_upstream_cached(url)
+            body, headers = fetch_source(sub)
         except Exception as e:
             print(f"[-] upstream {url} недоступен: {e}", flush=True)
             continue
@@ -1057,7 +1090,7 @@ def build_merged_response(route, spec, announce=""):
         seen_router.add(rid)
         router_configs.append(_wrap_as_router(
             rt.get("targets") or {}, rt.get("rules") or [],
-            rt.get("default_target") or "direct", rt.get("name") or "", rt.get("params")))
+            rt.get("default_target") or "direct", unsafe_name(rt.get("name")) if rt.get("unsafe") else rt.get("name") or "", rt.get("params")))
 
     have_json = bool(json_items) or bool(group_configs) or bool(router_configs)   # балансер/роутер форсят JSON
     out_configs = [it["cfg"] for it in json_items]
@@ -1396,7 +1429,7 @@ def build_route_response(route, spec=None, announce="", output_format="legacy"):
     mode = route.get("mode", "merge")
     has_renames = any((s.get("renames") for s in subs))
     # Зеркало байт-в-байт возможно только без ключей/групп/роутеров/переименований и с одной подпиской.
-    if mode == "mirror" and len(subs) == 1 and not keys and not groups and not routers and not has_renames:
+    if mode == "mirror" and len(subs) == 1 and not keys and not groups and not routers and not has_renames and not spec.get("unsafe"):
         body, headers = build_mirror_response(route, subs[0]["url"], announce)
     else:
         body, headers = build_merged_response(route, spec, announce)
@@ -1405,10 +1438,11 @@ def build_route_response(route, spec=None, announce="", output_format="legacy"):
     return body, headers
 
 
-def preview_subscription(url, limit=1000):
+def preview_subscription(url, limit=1000, body=None):
     """Скачать подписку и вернуть [{name, addr, link}] для UI-переименования.
     Гранулярность совпадает с merge: JSON → по конфигам, текст/base64 → по ссылкам."""
-    body, _headers = fetch_upstream_cached(url)
+    if body is None:
+        body, _headers = fetch_upstream_cached(url)
     out, seen = [], set()
     text = body.decode("utf-8", errors="ignore").strip()
     try:

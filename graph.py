@@ -15,6 +15,7 @@ import secrets
 import urllib.parse
 
 import subscriptions as subs
+import source_checks
 from subscriptions import normalize_path
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -495,6 +496,7 @@ def sync_graph_from_routes(cfg):
                     "id": (old or {}).get("id") or _new_id(),
                     "url": url,
                     "label": (old or {}).get("label", ""),
+                    "unsafe": source_checks.is_unsafe(old or {"url": url}),
                     "type": (old or {}).get("type", "source"),
                     "x": (old or {}).get("x"),
                     "y": (old or {}).get("y"),
@@ -610,7 +612,25 @@ def resolve_links_spec(store, route):
                             existing["renames"].extend(renames)
             elif fid in routes_by_id:
                 stack.append(fid)
-    return {"subs": subs, "keys": keys, "groups": groups, "routers": routers}
+    spec = {"subs": subs, "keys": keys, "groups": groups, "routers": routers}
+    return mark_unsafe(spec, cfg)
+
+
+def mark_unsafe(spec, cfg):
+    unsafe_urls = {s.get("url", "").strip() for s in cfg.get("sources", []) if source_checks.is_unsafe(s)}
+    def mark(value):
+        if isinstance(value, list):
+            return any([mark(x) for x in value])
+        if not isinstance(value, dict):
+            return False
+        unsafe = value.get("url") in unsafe_urls or any([mark(x) for x in value.values()])
+        if unsafe and any(key in value for key in ("url", "subs", "targets", "routers")):
+            value["unsafe"] = True
+            if "url" in value:
+                value["renames"] = []  # the country/warning label cannot be hidden
+        return unsafe
+    mark(spec)
+    return spec
 
 
 def _route_flat_io(rid, routes_by_id, incoming, src_by_id, node_meta):
@@ -783,7 +803,9 @@ def resolve_gateways(store):
         gw = (_node_router(s, node_meta) or {}).get("gateway")
         if not (isinstance(gw, dict) and gw.get("enabled")):
             continue
-        rr = _resolve_router(s, node_meta, incoming, src_by_id, routes_by_id)
+        rr = mark_unsafe(_resolve_router(s, node_meta, incoming, src_by_id, routes_by_id), cfg)
+        if rr.get("unsafe"):
+            rr["name"] = subs.unsafe_name(rr.get("name"))
         inbound = {"uuid": gw.get("uuid"), "path": gw.get("path"), "port": gw.get("port")}
         config = subs._wrap_as_server_gateway(rr["targets"], rr["rules"], rr["default_target"],
                                               rr["name"] or "gateway", inbound, rr["params"])
@@ -823,7 +845,7 @@ def find_route(store, path, host=None):
     """Host-aware: маршрут отдаётся ТОЛЬКО на своём домене (уникальность пути —
     per-domain). Домен запроса определяем по Host; если он не совпал ни с одним
     доменом (прямой IP/неизвестный хост/до миграции) — отдаём как дефолтный домен."""
-    norm = normalize_path(path)
+    norm = normalize_path(path).casefold()
     cfg = store.get_config() or {}
     settings = store.get_settings()
     serving = domain_for_host(settings, host) if host is not None else None
@@ -835,19 +857,19 @@ def find_route(store, path, host=None):
     # Точное совпадение домена (маршрут явно закреплён за serving) приоритетнее, чем
     # «осиротевший» маршрут (его домен выключен/удалён → падает в дефолтный): иначе
     # после выключения домена два маршрута с одним путём конкурировали бы по порядку.
-    fallback = None
-    for r in cfg.get("routes", []):
-        if not r.get("enabled", True):
+    exact, fallback = [], []
+    for route in cfg.get("routes", []):
+        if not route.get("enabled", True) or normalize_path(route.get("path", "")).casefold() != norm:
             continue
-        if normalize_path(r.get("path", "")) != norm:
-            continue
-        rd = domain_by_id(settings, r.get("domain_id") or "")
-        if rd is not None and rd.get("enabled", True):
-            if rd.get("id") == serving_id:
-                return dict(r)
-        elif default_id == serving_id and fallback is None:
-            fallback = r  # домен маршрута выключен/неизвестен → отдаём на дефолтном
-    return dict(fallback) if fallback else None
+        domain = domain_by_id(settings, route.get("domain_id") or "")
+        if domain is not None and domain.get("enabled", True):
+            if domain.get("id") == serving_id:
+                exact.append(route)
+        elif default_id == serving_id:
+            fallback.append(route)
+    matches = exact or fallback
+    # Never resolve an old case-only collision to a different person's route.
+    return dict(matches[0]) if len(matches) == 1 else None
 
 
 # ── запись через Store ────────────────────────────────────────────────────
@@ -911,7 +933,7 @@ def delete_route(store, route_id):
 def validate_route_path(store, path, ignore_id=None, domain_id="", access="public"):
     if not path:
         return "Путь не может быть пустым"
-    norm = normalize_path(path)
+    norm = normalize_path(path).casefold()
     if norm == "/":
         return "Путь не может быть просто '/'"
     if norm in RESERVED_PATHS:
@@ -928,7 +950,7 @@ def validate_route_path(store, path, ignore_id=None, domain_id="", access="publi
     for r in get_routes(store):
         if r.get("id") == ignore_id:
             continue
-        other_path = normalize_path(r.get("path", ""))
+        other_path = normalize_path(r.get("path", "")).casefold()
         if eff(r.get("domain_id") or "") == cand and (
                 (r.get("access") == "private" and norm.startswith(other_path + "/")) or
                 (access == "private" and other_path.startswith(norm + "/"))):
@@ -980,6 +1002,7 @@ def save_graph(store, data):
         sources.append({
             "id": sid,
             "url": str(s.get("url") or "").strip()[:2048],
+            "unsafe": source_checks.is_unsafe(s),
             "label": str(s.get("label") or "").strip()[:120],
             "type": str(s.get("type") or "source") if str(s.get("type") or "") in ("source", "key", "group", "autoselect", "router") else "source",
             "x": _num(s.get("x"), 80.0), "y": _num(s.get("y"), 80.0),
@@ -1008,10 +1031,10 @@ def save_graph(store, data):
         raw_did = str(r.get("domain_id") or "").strip()
         did = raw_did if raw_did in known_domain_ids else ""
         label = title or rid
-        key = (_eff_id(did), path)
+        key = (_eff_id(did), path.casefold())
         if not raw_path or path == "/":
             errors.append(f"Маршрут «{label}»: путь не задан")
-        elif path in RESERVED_PATHS:
+        elif path.casefold() in RESERVED_PATHS:
             errors.append(f"Путь {path} зарезервирован системой")
         elif key in used_paths:
             errors.append(f"Путь {path} используется несколькими маршрутами на одном домене")
@@ -1030,7 +1053,7 @@ def save_graph(store, data):
         if parent.get("access") != "private":
             continue
         for child in routes:
-            if child["id"] != parent["id"] and _eff_id(child["domain_id"]) == _eff_id(parent["domain_id"]) and child["path"].startswith(parent["path"] + "/"):
+            if child["id"] != parent["id"] and _eff_id(child["domain_id"]) == _eff_id(parent["domain_id"]) and child["path"].casefold().startswith(parent["path"].casefold() + "/"):
                 errors.append("Подпуть личного маршрута зарезервирован для пользовательских ссылок")
                 break
     if errors:

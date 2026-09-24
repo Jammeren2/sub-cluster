@@ -139,6 +139,63 @@ class PersonalTests(unittest.TestCase):
         self.assertIn('&lt;Alice &amp; Bob&gt;', html)
         self.assertNotIn('<Alice & Bob>', html)
 
+    def test_optional_contact_is_private_and_reaches_stats(self):
+        with patch.object(personal, 'verify_turnstile'):
+            result = server.personal_operation(self.route, {'op': 'create', 'name': 'Alice',
+                'contact': '@alice <&>', 'slug': 'AlicePhone', 'selected': [self.catalog[0]['id']]})
+        self.request(self.path.upper() + '/alicephone', {'X-Hwid': 'contact-phone'})
+        stats = server.CLUSTER.cluster_stats()
+        row = next(r for r in stats[self.route['id']]['devices'] if r['hwid'] == 'contact-phone')
+        self.assertEqual(row['personal_contact'], '@alice <&>')
+        html = server.webui.render_stats(stats, graph.get_routes(server.STORE), 'test', '')
+        self.assertIn('@alice &lt;&amp;&gt;', html)
+        _, body, headers = self.request(self.path + '/ALICEPHONE', {'X-Hwid': 'contact-phone'})
+        self.assertNotIn(b'@alice', body)
+        self.assertNotIn('@alice', str(headers))
+        self.request(self.path + '/alicephone', {'X-Hwid': 'impostor'})
+        rows = server.STORE.get_stats()[self.route['id']]['devices']
+        self.assertEqual(next(r for r in rows if r['hwid'] == 'impostor')['personal_contact'], '')
+        self.assertEqual(server.PERSONAL.access(self.route['id'], 'ALICEPHONE', token=result['token'])['contact'], '@alice <&>')
+        self.assertEqual(self.create()['contact'], '')
+        for contact in ('x' * 161, 'one\ntwo'):
+            with self.assertRaises(personal.PersonalError):
+                server.PERSONAL.create(self.route['id'], 'Alice', '', [], contact=contact)
+
+    def test_case_insensitive_routes_and_slug_collisions(self):
+        graph.update_route(server.STORE, self.route['id'], path='/Shabolda')
+        status, body, _ = self.request('/shABolda', {'Accept': 'text/html'})
+        self.assertEqual(status, 200)
+        self.assertIn(b'personal-form', body)
+        link = self.create('MixedCase')
+        self.assertEqual(server.PERSONAL.access(self.route['id'], 'mixedcase', token=link['token'])['name'], 'Alice')
+        with self.assertRaises(personal.PersonalError):
+            self.create('MIXEDCASE')
+        with self.assertRaises(personal.PersonalError):
+            server.PERSONAL.access(self.route['id'], 'mixedcase', token=link['token'].swapcase())
+        data = graph.get_graph(server.STORE)
+        data['routes'].append({**data['routes'][0], 'id': 'collision', 'path': '/shabolda'})
+        self.assertFalse(graph.save_graph(server.STORE, data)[0])
+        self.assertTrue(graph.validate_route_path(server.STORE, '/SHABOLDA'))
+
+    def test_contact_columns_migrate_existing_database(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            filename = os.path.join(directory, 'old.db')
+            with sqlite3.connect(filename) as db:
+                db.execute('CREATE TABLE personal_links (route TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, selected TEXT NOT NULL, manage_hash TEXT NOT NULL, device_hash TEXT NOT NULL DEFAULT "", created REAL NOT NULL, PRIMARY KEY(route,slug))')
+                db.execute('CREATE TABLE device_seen (route_id TEXT NOT NULL, device TEXT NOT NULL, hwid TEXT, model TEXT, app TEXT, ip TEXT, cnt INTEGER NOT NULL DEFAULT 0, first_ts REAL, last_ts REAL, personal_name TEXT NOT NULL DEFAULT "", PRIMARY KEY(route_id, device))')
+                db.execute('INSERT INTO device_seen VALUES("old","phone","phone","","","",7,1,2,"Alice")')
+            registry = personal.Registry(filename)
+            self.assertEqual(registry.create('old','Alice','phone',[])['contact'], '')
+            old_store = server.storemod.Store(db_file=filename, origin='migration-test')
+            try:
+                row = old_store.get_stats()['old']['devices'][0]
+                self.assertEqual(row['cnt'], 7)
+                self.assertEqual(row['personal_name'], 'Alice')
+                self.assertEqual(row['personal_contact'], '')
+            finally:
+                old_store._conn.close()
+
     def test_private_base_notice_and_browser(self):
         status, body, headers = self.request()
         self.assertEqual(status, 200)

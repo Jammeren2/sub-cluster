@@ -4,6 +4,12 @@ FROM python:3.12-slim
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Background source verification: pinned mihomo, amd64/arm64, verified archive.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY install_checker.py /tmp/install_checker.py
+RUN python /tmp/install_checker.py && rm /tmp/install_checker.py
+ENV MIHOMO_BIN=/opt/mihomo/mihomo
+
 WORKDIR /app
 COPY *.py editor.js editor.css shell.js shell.css ./
 # flowseal-данные (стратегии + hostlists + fake-payload'ы) — приложение читает стратегии
