@@ -140,43 +140,117 @@ class SourceChecksTests(unittest.TestCase):
             db.execute('UPDATE checked_links SET lease_until=?', (time.time() - 1,))
         self.assertIsNotNone(checks.Checker(self.path, self.store).next_link(self.url, claim=True))
 
-    def test_parallel_scheduler_refills_without_waiting_for_slow_probe(self):
-        links = [VLESS.replace('vpn.example', f'vpn{i}.example') for i in range(6)]
+    def test_batch_scheduler_reuses_engine_and_obeys_limit(self):
+        links = [VLESS.replace('vpn.example', f'vpn{i}.example') for i in range(7)]
         self.checker.ingest(self.url, '\n'.join(links).encode())
         self.store.update_config(lambda cfg: cfg.update(sources=[{'url':self.url,'unsafe':True}]))
-        lock, release = threading.Lock(), threading.Event()
-        started, peak, running = [], [0], [0]
-        first_batch, refilled = threading.Event(), threading.Event()
-        def fake_probe(link):
-            with lock:
-                started.append(link)
-                running[0] += 1
-                peak[0] = max(peak[0], running[0])
-                if len(started) >= 3:
-                    first_batch.set()
-                if len(started) >= 4:
-                    refilled.set()
-            try:
-                if 'vpn0.example' in link:
-                    release.wait(5)
-                else:
-                    first_batch.wait(5)
-                return {'country':'NL','exit_ip':'1.1.1.1'}
-            finally:
-                with lock:
-                    running[0] -= 1
-        with patch.object(checks, 'WORKERS', 3), patch.object(checks, 'PAUSE', .01), patch.object(checks, 'probe', side_effect=fake_probe), patch.object(self.checker, 'refresh'):
-            self.checker.start()
-            try:
-                self.assertTrue(first_batch.wait(3))
-                self.assertTrue(refilled.wait(3), 'slow first probe blocked the queue')
-                self.assertEqual(peak[0], 3)
-            finally:
-                self.checker.stop.set()
-                release.set()
-                self.checker.thread.join(5)
-        self.assertFalse(self.checker.thread.is_alive())
-        self.assertEqual(len(started), len(set(started)))
+        sizes, seen = [], []
+        checker = self.checker
+        class Engine:
+            def __init__(self, *args):
+                self.closed = False
+            def run(self, rows, record, stop):
+                sizes.append(len(rows))
+                for row in rows:
+                    seen.append(row['key'])
+                    record(row, 'ok', {'country':'NL','exit_ip':'1.1.1.1'})
+                if len(seen) == 7:
+                    stop.set()
+            def close(self):
+                self.closed = True
+        engine = Engine()
+        with patch.object(checks, 'CONCURRENCY', 3), patch.object(checks, 'core_path', return_value='/core'), patch('probe_runtime.BatchEngine', return_value=engine) as factory, patch.object(checker, 'refresh'):
+            checker.start()
+            checker.thread.join(5)
+        self.assertFalse(checker.thread.is_alive())
+        factory.assert_called_once()
+        self.assertTrue(engine.closed)
+        self.assertEqual(sizes, [3, 3, 1])
+        self.assertEqual(len(set(seen)), 7)
+        self.assertEqual(checker.status(self.url)['working'], 7)
+
+    def test_unsupported_skipped_and_half_hour_cycle(self):
+        bad = VLESS.replace('security=tls', 'type=xhttp')
+        self.checker.ingest(self.url, (VLESS + '\n' + bad).encode())
+        self.assertEqual(self.checker.status(self.url)['unsupported'], 1)
+        rows = self.checker.claim_batch([self.url], 192)
+        self.assertEqual(len(rows), 1)
+        self.checker.record(rows[0], 'ok', {'country':'NL','exit_ip':'1.1.1.1'})
+        with self.checker.connect() as db:
+            db.execute('UPDATE checked_links SET checked=? WHERE state="ok"', (time.time() - 1790,))
+        self.assertEqual(self.checker.claim_batch([self.url], 192), [])
+        with self.checker.connect() as db:
+            db.execute('UPDATE checked_links SET checked=? WHERE state="ok"', (time.time() - 1801,))
+        self.assertEqual(len(self.checker.claim_batch([self.url], 192)), 1)
+        # Core-unsupported results stay excluded even when the same feed refreshes.
+        self.checker.ingest(self.url, (VLESS + '\n' + bad).encode())
+        self.assertEqual(self.checker.status(self.url)['unsupported'], 1)
+
+    def test_async_timeout_is_concurrent_and_private_hosts_never_reach_core(self):
+        import asyncio
+        from probe_runtime import BatchEngine
+        engine = BatchEngine('/unused', .05)
+        try:
+            result = []
+            record = lambda row, state, data: result.append(state)
+            async def slow(port):
+                await asyncio.sleep(1)
+            engine.request = slow
+            started = time.monotonic()
+            engine.loop.run_until_complete(engine.check_entries([({'key':i}, {}, i) for i in range(192)], record, threading.Event()))
+            self.assertLess(time.monotonic() - started, .8)
+            self.assertEqual(result, ['failed'] * 192)
+            result.clear()
+            rows = [{'link':VLESS.replace('vpn.example','127.0.0.1')}]
+            prepared = engine.loop.run_until_complete(engine.prepare(rows, record))
+            self.assertEqual(prepared, [])
+            self.assertEqual(result, ['failed'])
+        finally:
+            engine.close()
+
+    def test_engine_failure_preserves_pending_and_releases_claims(self):
+        from probe_runtime import EngineUnavailable
+        self.checker.ingest(self.url, VLESS.encode())
+        self.store.update_config(lambda cfg: cfg.update(sources=[{'url':self.url,'unsafe':True}]))
+        checker = self.checker
+        class BrokenEngine:
+            def __init__(self, *args):
+                pass
+            def run(self, rows, record, stop):
+                stop.set()
+                raise EngineUnavailable('Unavailable')
+            def close(self):
+                pass
+        with patch.object(checks, 'core_path', return_value='/core'), patch('probe_runtime.BatchEngine', BrokenEngine), patch.object(checker, 'refresh'):
+            checker.run()
+        self.assertEqual(checker.status(self.url)['pending'], 1)
+        self.assertEqual(checker.status(self.url)['failed'], 0)
+        self.assertEqual(len(checker.claim_batch([self.url], 192)), 1)
+
+    def test_core_rejects_one_entry_without_poisoning_batch(self):
+        import io
+        import urllib.error
+        from probe_runtime import BatchEngine
+        engine = BatchEngine('/unused')
+        try:
+            recorded, payloads = [], []
+            def api(method, path, data):
+                payloads.append(data['payload'])
+                if len(payloads) == 1:
+                    raise urllib.error.HTTPError('http://localhost', 400, 'invalid', {}, io.BytesIO(b'{"message":"proxy 0: unsupported cipher"}'))
+            engine.api = api
+            p = {'type':'trojan', 'server':'1.1.1.1', 'port':443, 'password':'test-😀'}
+            entries = engine.configure([({'key':'bad'}, p), ({'key':'good'}, p)], lambda row, state, data: recorded.append((row['key'], state)))
+            self.assertEqual(recorded, [('bad', 'unsupported')])
+            self.assertEqual([r['key'] for r, _, _ in entries], ['good'])
+            # Go's YAML parser cannot decode JSON surrogate-pair escapes.
+            self.assertIn('😀', payloads[-1])
+            config = json.loads(payloads[-1])
+            self.assertEqual(config['rules'], ['MATCH,REJECT'])
+            self.assertEqual(config['listeners'][0]['proxy'], config['proxies'][0]['name'])
+            self.assertTrue(config['listeners'][0]['users'][0]['password'])
+        finally:
+            engine.close()
 
     def test_auto_seed_once_and_empty_unsafe_source(self):
         self.checker.seed_public_source()

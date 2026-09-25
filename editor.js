@@ -197,9 +197,9 @@
     const trustLabel=el('label'); const trust=el('input'); trust.type='checkbox'; trust.style.width='auto'; trust.checked=!!s.unsafe; trust.disabled=s.url==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';
     trust.addEventListener('change',()=>{s.unsafe=trust.checked;checkHelp.hidden=!s.unsafe;markDirty();});
     trustLabel.append(trust,document.createTextNode(' Небезопасный источник · проверять серверы'));bd.appendChild(trustLabel);
-    const checkHelp=el('div','hint','В подписку попадут только проверенные серверы. Проверяем параллельно с ограничением нагрузки, страну определяем через VPN. Счётчики обновляются при перезагрузке страницы.');checkHelp.hidden=!s.unsafe;bd.appendChild(checkHelp);
+    const checkHelp=el('div','hint','В подписку попадут только проверенные серверы. Цель — проверять все поддерживаемые ссылки раз в 30 минут. Страну определяем через VPN. Счётчики обновляются при перезагрузке страницы.');checkHelp.hidden=!s.unsafe;bd.appendChild(checkHelp);
     url.addEventListener('input',()=>{trust.disabled=url.value.trim()==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';if(trust.disabled){s.unsafe=true;trust.checked=true;}checkHelp.hidden=!s.unsafe;});
-    if(s.check_status){const st=s.check_status;bd.appendChild(el('div','hint',st.error||('Работают: '+st.working+' / '+st.total+' · ожидают: '+st.pending+' · ошибки: '+st.failed+' · не поддержаны: '+st.unsupported)));}
+    if(s.check_status){const st=s.check_status;bd.appendChild(el('div','hint',st.error||('Работают: '+st.working+' / '+st.total+' · ожидают: '+st.pending+' · ошибки: '+st.failed+' · пропущены: '+st.unsupported+' · пора проверить: '+(st.due||0)+(st.per_minute?' · '+st.per_minute+'/мин':'')+(st.eta_minutes!=null?' · очередь ≈ '+st.eta_minutes+' мин':''))));}
     // переименование отдельных ссылок внутри подписки
     const det=el('details'); det.appendChild(el('summary',null,'Переименовать ссылки'));
     const box=el('div','linkbox');

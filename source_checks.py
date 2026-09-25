@@ -1,4 +1,4 @@
-"""Slow, persistent per-node verification of explicitly untrusted subscription feeds.
+"""Bounded, persistent per-node verification of explicitly untrusted subscription feeds.
 Only a successful HTTPS request THROUGH the candidate makes it publishable.
 No direct fallback; raw feed credentials never go to the portal or checker logs.
 """
@@ -32,8 +32,9 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_LINKS = 100000
 REFRESH = 6 * 3600
 TTL = 72 * 3600
-WORKERS = max(1, min(16, int(os.environ.get('SOURCE_CHECK_WORKERS', '4'))))
-PAUSE = max(0.05, min(60, float(os.environ.get('SOURCE_CHECK_PAUSE', '0.2'))))
+CONCURRENCY = max(1, min(256, int(os.environ.get('SOURCE_CHECK_CONCURRENCY', '192'))))
+CYCLE = max(60, int(os.environ.get('SOURCE_CHECK_CYCLE_SECONDS', '1800')))
+TIMEOUT = max(2, min(30, float(os.environ.get('SOURCE_CHECK_TIMEOUT', '8'))))
 LEASE_SECONDS = 120
 
 
@@ -113,16 +114,23 @@ def proxy_config(link):
     return p
 
 
+def validate_proxy(p):
+    json.dumps(p, ensure_ascii=False).encode('utf-8')
+    if not p.get('server') or not 1 <= int(p.get('port') or 0) <= 65535:
+        raise ValueError('unsupported_endpoint')
+
+
 def checked_proxy(link):
     p = proxy_config(link)
-    host, port = p.get('server'), int(p.get('port') or 0)
-    if not host or not 1 <= port <= 65535:
-        raise ValueError('invalid_endpoint')
-    # Pin a public address so an untrusted feed cannot probe the cluster/private LAN
-    # or change a DNS answer between validation and the core's connection.
-    addresses = list(dict.fromkeys(x[4][0] for x in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
+    validate_proxy(p)
+    addresses = list(dict.fromkeys(x[4][0] for x in socket.getaddrinfo(p['server'], p['port'], type=socket.SOCK_STREAM)))
     if not addresses or any(not ipaddress.ip_address(x).is_global for x in addresses):
         raise ValueError('non_public_endpoint')
+    return pin_proxy(p, addresses)
+
+
+def pin_proxy(p, addresses):
+    host = p['server']
     if p.get('tls') or p['type'] in ('trojan', 'hysteria', 'hysteria2', 'tuic'):
         key = 'servername' if p['type'] in ('vless', 'vmess') else 'sni'
         p.setdefault(key, host)
@@ -193,6 +201,8 @@ class Checker:
         self.stop = threading.Event()
         self.thread = None
         self.round = 0
+        self.engine_error = ""
+        self.samples = collections.deque(maxlen=10000)
         with self.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS checked_sources(url TEXT PRIMARY KEY, refreshed REAL NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT "")')
             db.execute('CREATE TABLE IF NOT EXISTS checked_links(url TEXT, key TEXT, link TEXT, position INTEGER, checked REAL NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT "pending", country TEXT NOT NULL DEFAULT "", exit_ip TEXT NOT NULL DEFAULT "", PRIMARY KEY(url,key))')
@@ -230,11 +240,18 @@ class Checker:
             for queue in buckets.values():
                 if queue:
                     ordered.append(queue.popleft())
+        unsupported = []
+        for key, link in ordered:
+            try:
+                validate_proxy(proxy_config(link))
+            except Exception:
+                unsupported.append((time.time(), url, key))
         with self.connect() as db:
             db.execute('CREATE TEMP TABLE current_keys(key TEXT PRIMARY KEY)')
             db.executemany('INSERT INTO current_keys VALUES(?)', [(key,) for key, _ in ordered])
             db.executemany('INSERT INTO checked_links(url,key,link,position) VALUES(?,?,?,?) ON CONFLICT(url,key) DO UPDATE SET position=excluded.position',
                            [(url, key, link, pos) for pos, (key, link) in enumerate(ordered)])
+            db.executemany('UPDATE checked_links SET state="unsupported",checked=?,lease_until=0 WHERE url=? AND key=?', unsupported)
             db.execute('DELETE FROM checked_links WHERE url=? AND key NOT IN (SELECT key FROM current_keys)', (url,))
             db.execute('INSERT INTO checked_sources(url,refreshed,error) VALUES(?,?,"") ON CONFLICT(url) DO UPDATE SET refreshed=excluded.refreshed,error=""', (url, time.time()))
 
@@ -264,13 +281,7 @@ class Checker:
             if claim:
                 db.execute("BEGIN IMMEDIATE")
             now = time.time()
-            # Every second turn refreshes a working server, so a long first scan
-            # cannot leave the published subset unchecked for days.
-            row = None
-            if self.round % 2:
-                row = db.execute('SELECT * FROM checked_links WHERE url=? AND state="ok" AND checked<? AND lease_until<? ORDER BY checked LIMIT 1', (url, now - 3600, now)).fetchone()
-            if row is None:
-                row = db.execute('SELECT * FROM checked_links WHERE url=? AND checked<? AND lease_until<? ORDER BY checked,position LIMIT 1', (url, now - 3600, now)).fetchone()
+            row = db.execute('SELECT * FROM checked_links WHERE url=? AND state!="unsupported" AND checked<? AND lease_until<? ORDER BY checked,position LIMIT 1', (url, now - CYCLE, now)).fetchone()
             if row is not None and claim:
                 db.execute("UPDATE checked_links SET lease_until=? WHERE url=? AND key=?", (now + LEASE_SECONDS, url, row["key"]))
         self.round += 1
@@ -309,54 +320,75 @@ class Checker:
         with self.connect() as db:
             rows = db.execute('SELECT state,count(*) AS n FROM checked_links WHERE url=? GROUP BY state', (url,)).fetchall()
             fresh = db.execute('SELECT count(*) FROM checked_links WHERE url=? AND state="ok" AND checked>?', (url, time.time() - TTL)).fetchone()[0]
+            due = db.execute('SELECT count(*) FROM checked_links WHERE url=? AND state!="unsupported" AND checked<?', (url, time.time() - CYCLE)).fetchone()[0]
             source = db.execute('SELECT error FROM checked_sources WHERE url=?', (url,)).fetchone()
         counts = {r['state']: r['n'] for r in rows}
+        recent = [t for t, u in list(self.samples) if u == url and t > time.time() - 300]
+        rate = (len(recent) - 1) / max(1, time.time() - recent[0]) if len(recent) > 1 else 0
         return {'total': sum(counts.values()), 'working': fresh, 'pending': counts.get('pending', 0),
                 'unsupported': counts.get('unsupported', 0), 'failed': counts.get('failed', 0),
-                'error': ('Нужны mihomo и curl на этом узле' if not core_path() or not shutil.which('curl') else (source['error'] if source else ''))}
+                'due': due, 'cycle_minutes': CYCLE // 60, 'per_minute': round(rate * 60),
+                'eta_minutes': round(due / rate / 60) if rate else None,
+                'error': self.engine_error or ('Нужен mihomo на этом узле' if not core_path() else (source['error'] if source else ''))}
+
+    def claim_batch(self, urls, limit):
+        if not urls:
+            return []
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            marks = ','.join('?' for _ in urls)
+            now = time.time()
+            rows = db.execute(f'SELECT * FROM checked_links WHERE url IN ({marks}) AND state!="unsupported" AND checked<? AND lease_until<? ORDER BY checked,position LIMIT ?', (*urls, now - CYCLE, now, limit)).fetchall()
+            db.executemany('UPDATE checked_links SET lease_until=? WHERE url=? AND key=?',
+                           [(now + LEASE_SECONDS, r['url'], r['key']) for r in rows])
+        return [dict(r) for r in rows]
+
+    def record(self, row, state, result):
+        with self.connect() as db:
+            db.execute('UPDATE checked_links SET checked=?,state=?,country=?,exit_ip=?,lease_until=0 WHERE url=? AND key=?',
+                       (time.time(), state, result.get('country', ''), result.get('exit_ip', ''), row['url'], row['key']))
+        self.samples.append((time.time(), row['url']))
 
     def run(self):
-        cursor, refresh_cursor = 0, 0
-        # Separate refresh executor: a slow feed download must not stall probes.
-        with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='vpn-probe') as pool, ThreadPoolExecutor(max_workers=1, thread_name_prefix='feed-refresh') as refresh_pool:
-            active, refreshing = set(), None
-            while not self.stop.is_set():
-                try:
-                    for future in list(active):
-                        if future.done():
-                            active.remove(future)
-                            try:
-                                future.result()
-                            except Exception:
-                                pass  # lease expiry recovers transient SQLite failures
-                    urls = list(dict.fromkeys(s.get('url', '').strip() for s in self.store.get_config().get('sources', []) if is_unsafe(s) and s.get('url')))
-                    if refreshing is None or refreshing.done():
-                        if refreshing is not None:
-                            finished, refreshing = refreshing, None
-                            finished.result()
-                        if urls:
-                            refreshing = refresh_pool.submit(self.refresh, urls[refresh_cursor % len(urls)])
-                            refresh_cursor += 1
-                    # Round-robin sources, immediately refill each completed slot.
-                    for _ in range(WORKERS - len(active)):
-                        row = None
-                        for _ in urls:
-                            url = urls[cursor % len(urls)]
+        from probe_runtime import BatchEngine, EngineUnavailable
+        engine, refreshing, cursor = None, None, 0
+        try:
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix='feed-refresh') as refresh_pool:
+                while not self.stop.is_set():
+                    rows = []
+                    try:
+                        urls = list(dict.fromkeys(s.get('url', '').strip() for s in self.store.get_config().get('sources', []) if is_unsafe(s) and s.get('url')))
+                        if refreshing is None or refreshing.done():
+                            if refreshing is not None:
+                                refreshing.result()
+                            refreshing = refresh_pool.submit(self.refresh, urls[cursor % len(urls)]) if urls else None
                             cursor += 1
-                            row = self.next_link(url, claim=True)
-                            if row:
-                                break
-                        if not row:
-                            break
-                        active.add(pool.submit(self.check_row, row))
-                    with self.connect() as db:
-                        existing = [r[0] for r in db.execute('SELECT url FROM checked_sources')]
-                        for old in set(existing) - set(urls):
-                            db.execute('DELETE FROM checked_links WHERE url=?', (old,))
-                            db.execute('DELETE FROM checked_sources WHERE url=?', (old,))
-                except Exception:
-                    pass
-                self.stop.wait(PAUSE)
+                        if not core_path():
+                            raise EngineUnavailable('Нужен mihomo на этом узле')
+                        rows = self.claim_batch(urls, CONCURRENCY)
+                        if rows:
+                            if engine is None:
+                                engine = BatchEngine(core_path(), TIMEOUT)
+                            engine.run(rows, self.record, self.stop)
+                        self.engine_error = ''
+                        with self.connect() as db:
+                            existing = [r[0] for r in db.execute('SELECT url FROM checked_sources')]
+                            for old in set(existing) - set(urls):
+                                db.execute('DELETE FROM checked_links WHERE url=?', (old,))
+                                db.execute('DELETE FROM checked_sources WHERE url=?', (old,))
+                    except Exception as exc:
+                        self.engine_error = str(exc) if isinstance(exc, EngineUnavailable) else 'Сбой проверки; очередь будет повторена'
+                        if engine:
+                            engine.close()
+                            engine = None
+                    finally:
+                        if rows:
+                            with self.connect() as db:
+                                db.executemany('UPDATE checked_links SET lease_until=0 WHERE url=? AND key=?', [(r['url'], r['key']) for r in rows])
+                    self.stop.wait(5 if self.engine_error else (.05 if rows else 1))
+        finally:
+            if engine:
+                engine.close()
 
     def seed_public_source(self):
         """One-time disconnected source; never changes existing route outputs."""
