@@ -252,6 +252,67 @@ class SourceChecksTests(unittest.TestCase):
         finally:
             engine.close()
 
+    def test_cluster_union_failure_isolation_expiry_and_no_echo(self):
+        other_path = str(Path(self.tmp.name) / 'other.sqlite')
+        other = checks.Checker(other_path, self.store)
+        for checker in (self.checker, other):
+            checker.ingest(self.url, (VLESS + '\n' + TROJAN).encode())
+        local = self.checker.claim_batch([self.url], 2)
+        remote = other.claim_batch([self.url], 2)
+        result = {'country':'NL','exit_ip':'1.1.1.1'}
+        self.checker.record(local[0], 'ok', result)
+        self.checker.record(local[1], 'failed', {})
+        other.record(remote[0], 'failed', {})
+        other.record(remote[1], 'ok', result)
+        snapshot = other.snapshot()
+        self.checker.merge_snapshot('peer', snapshot)
+        self.assertEqual(len(subs.extract_links(self.checker.body(self.url)[0])), 2)
+        self.assertEqual(self.checker.status(self.url)['local_working'], 1)
+        self.assertEqual(self.checker.status(self.url)['working'], 2)
+        self.assertEqual(len(self.checker.snapshot()['links']), 1, 'imported results must not echo')
+        # Restart retains imported successes.
+        self.assertEqual(len(checks.Checker(self.path, self.store).combined(self.url)), 2)
+        # Duplicate successes still produce a single link.
+        other.record(remote[0], 'ok', result)
+        self.checker.merge_snapshot('peer', other.snapshot())
+        self.assertEqual(len(self.checker.combined(self.url)), 2)
+        # A failed recheck on peer removes only its own successes.
+        for row in remote:
+            other.record(row, 'failed', {})
+        self.checker.merge_snapshot('peer', other.snapshot())
+        self.assertEqual(len(self.checker.combined(self.url)), 1)
+        self.checker.merge_snapshot('peer', snapshot)  # stale replay must not resurrect
+        self.assertEqual(len(self.checker.combined(self.url)), 1)
+        other.record(remote[1], 'ok', result)
+        self.checker.merge_snapshot('peer', other.snapshot())
+        with patch.object(checks.time, 'time', return_value=time.time() + checks.TTL + 1):
+            self.assertEqual(self.checker.combined(self.url), [])
+
+    def test_cluster_sync_outage_and_disabled_peer(self):
+        from unittest.mock import Mock
+        self.checker.ingest(self.url, VLESS.encode())
+        row = self.checker.claim_batch([self.url], 1)[0]
+        self.checker.record(row, 'ok', {'country':'NL','exit_ip':'1.1.1.1'})
+        snapshot = self.checker.snapshot()
+        self.checker.record(row, 'failed', {})
+        cluster = Mock()
+        cluster.id = 'self'
+        cluster.get_nodes.return_value = [{'id':'self'}, {'id':'peer'}]
+        cluster._peer_base.return_value = 'https://peer.example'
+        cluster._http.return_value = snapshot
+        self.checker.cluster = cluster
+        self.checker.sync_once()
+        cluster._http.assert_called_once_with('https://peer.example', '/cluster/source-checks', timeout=15)
+        self.assertEqual(len(self.checker.combined(self.url)), 1)
+        cluster._http.side_effect = TimeoutError
+        self.checker.sync_once()
+        self.assertEqual(len(self.checker.combined(self.url)), 1)
+        cluster.get_nodes.return_value = [{'id':'self'}]
+        self.assertEqual(self.checker.combined(self.url), [])
+        self.checker.sync_once()
+        with self.checker.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM checked_peer_links').fetchone()[0], 0)
+
     def test_auto_seed_once_and_empty_unsafe_source(self):
         self.checker.seed_public_source()
         self.assertEqual(len(self.store.get_config()['sources']), 1)

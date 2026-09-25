@@ -399,6 +399,13 @@ class PersonalTests(unittest.TestCase):
                 urllib.request.urlopen(request)
             self.assertEqual(rejected.exception.code, 401)
             rejected.exception.close()
+            with self.assertRaises(urllib.error.HTTPError) as rejected_checks:
+                urllib.request.urlopen(base + '/cluster/source-checks')
+            self.assertEqual(rejected_checks.exception.code, 401)
+            rejected_checks.exception.close()
+            snapshot = server.CLUSTER._http(base, '/cluster/source-checks')
+            self.assertEqual(snapshot['version'], 1)
+            self.assertIsInstance(snapshot['links'], list)
             result = server.CLUSTER._http(base, '/cluster/personal', 'POST', {'op':'catalog','route_id':self.route['id'],'ip':'peer-test'})
             self.assertTrue(result['ok'])
             self.assertEqual(len(result['items']),2)

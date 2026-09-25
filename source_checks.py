@@ -200,6 +200,8 @@ class Checker:
         self.db_file, self.store = db_file, store
         self.stop = threading.Event()
         self.thread = None
+        self.cluster = None
+        self.sync_thread = None
         self.round = 0
         self.engine_error = ""
         self.samples = collections.deque(maxlen=10000)
@@ -209,6 +211,9 @@ class Checker:
             columns = {r[1] for r in db.execute('PRAGMA table_info(checked_links)')}
             if 'lease_until' not in columns:
                 db.execute('ALTER TABLE checked_links ADD COLUMN lease_until REAL NOT NULL DEFAULT 0')
+            db.execute('CREATE TABLE IF NOT EXISTS checked_peer_links(node TEXT,url TEXT,key TEXT,link TEXT,checked REAL,country TEXT,PRIMARY KEY(node,url,key))')
+            db.execute('CREATE TABLE IF NOT EXISTS checked_peer_snapshots(node TEXT PRIMARY KEY,stamp REAL)')
+            db.execute('CREATE INDEX IF NOT EXISTS checked_peer_source ON checked_peer_links(url,checked)')
             db.execute('CREATE INDEX IF NOT EXISTS checked_queue ON checked_links(url,checked,position)')
 
     @contextmanager
@@ -311,10 +316,96 @@ class Checker:
             with self.connect() as db:
                 db.execute('UPDATE checked_links SET lease_until=0 WHERE url=? AND key=?', (row['url'], row['key']))
 
-    def body(self, url):
+    def peer_ids(self):
+        if self.cluster is None:
+            return None
+        return {n['id'] for n in self.cluster.get_nodes() if n['id'] != self.cluster.id}
+
+    def combined(self, url):
+        cutoff = time.time() - TTL
         with self.connect() as db:
-            rows = db.execute('SELECT link,country,key FROM checked_links WHERE url=? AND state="ok" AND checked>? ORDER BY position', (url, time.time() - TTL)).fetchall()
+            local = db.execute('SELECT link,country,key,checked FROM checked_links WHERE url=? AND state="ok" AND checked>? ORDER BY position', (url, cutoff)).fetchall()
+            remote = db.execute('SELECT node,link,country,key,checked FROM checked_peer_links WHERE url=? AND checked>? ORDER BY node,key', (url, cutoff)).fetchall()
+        allowed = self.peer_ids()
+        merged = {r['key']: dict(r) for r in local}
+        for row in remote:
+            if allowed is not None and row['node'] not in allowed:
+                continue
+            old = merged.get(row['key'])
+            if old is None or row['checked'] > old['checked']:
+                merged[row['key']] = dict(row)
+        return list(merged.values())
+
+    def body(self, url):
+        rows = self.combined(url)
         return subs._b64list([subs._apply_name(r['link'], PREFIX + r['country'] + ' · ' + r['key'][:8]) for r in rows]), {}
+
+    def snapshot(self):
+        # Only our own observations: never re-export imported successes.
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT url,key,link,checked,country FROM checked_links WHERE state="ok" AND checked>? ORDER BY url,key', (time.time() - TTL,)).fetchall()
+            stamp = time.time()
+        return {'version': 1, 'stamp': stamp, 'links': [dict(r) for r in rows]}
+
+    def merge_snapshot(self, node, doc):
+        if doc.get('version') != 1 or not isinstance(doc.get('links'), list):
+            raise ValueError('invalid_snapshot')
+        stamp = float(doc['stamp'])
+        now = time.time()
+        if not 0 < stamp <= now + 300:
+            raise ValueError('invalid_snapshot_time')
+        records = []
+        for row in doc['links']:
+            link, url, key = row['link'], row['url'], row['key']
+            checked = float(row['checked'])
+            if not isinstance(url, str) or not isinstance(link, str) or len(link) > 16384:
+                raise ValueError('invalid_snapshot_link')
+            if hashlib.sha256(link.encode()).hexdigest() != key or not re.fullmatch('[A-Z]{2}', row['country']):
+                raise ValueError('invalid_snapshot_link')
+            if not 0 < checked <= min(stamp, now + 300):
+                raise ValueError('invalid_check_time')
+            if checked > now - TTL:
+                records.append((node, url, key, link, checked, row['country']))
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT stamp FROM checked_peer_snapshots WHERE node=?', (node,)).fetchone()
+            if old and old['stamp'] >= stamp:
+                return
+            # A failed recheck removes only this node's contribution.
+            db.execute('DELETE FROM checked_peer_links WHERE node=?', (node,))
+            db.executemany('INSERT INTO checked_peer_links VALUES(?,?,?,?,?,?)', records)
+            db.execute('INSERT OR REPLACE INTO checked_peer_snapshots VALUES(?,?)', (node, stamp))
+
+    def sync_once(self):
+        if self.cluster is None:
+            return
+        nodes = [n for n in self.cluster.get_nodes() if n['id'] != self.cluster.id]
+        for node in nodes:
+            if self.stop.is_set():
+                return
+            try:
+                base = self.cluster._peer_base(node)
+                if base:
+                    self.merge_snapshot(node['id'], self.cluster._http(base, '/cluster/source-checks', timeout=15))
+            except Exception:
+                # An unreachable/older peer cannot erase its still-fresh results.
+                pass
+        allowed = {n['id'] for n in nodes}
+        with self.connect() as db:
+            for row in db.execute('SELECT node FROM checked_peer_snapshots').fetchall():
+                if row['node'] not in allowed:
+                    db.execute('DELETE FROM checked_peer_links WHERE node=?', (row['node'],))
+                    db.execute('DELETE FROM checked_peer_snapshots WHERE node=?', (row['node'],))
+            db.execute('DELETE FROM checked_peer_links WHERE checked<?', (time.time() - TTL,))
+
+    def sync_run(self):
+        while not self.stop.is_set():
+            try:
+                self.sync_once()
+            except Exception:
+                pass
+            self.stop.wait(60)
 
     def status(self, url):
         with self.connect() as db:
@@ -325,7 +416,7 @@ class Checker:
         counts = {r['state']: r['n'] for r in rows}
         recent = [t for t, u in list(self.samples) if u == url and t > time.time() - 300]
         rate = (len(recent) - 1) / max(1, time.time() - recent[0]) if len(recent) > 1 else 0
-        return {'total': sum(counts.values()), 'working': fresh, 'pending': counts.get('pending', 0),
+        return {'total': sum(counts.values()), 'working': len(self.combined(url)), 'local_working': fresh, 'pending': counts.get('pending', 0),
                 'unsupported': counts.get('unsupported', 0), 'failed': counts.get('failed', 0),
                 'due': due, 'cycle_minutes': CYCLE // 60, 'per_minute': round(rate * 60),
                 'eta_minutes': round(due / rate / 60) if rate else None,
@@ -404,6 +495,9 @@ class Checker:
             self.store.update_config(mutate)
 
     def start(self):
+        if self.cluster is not None and (not self.sync_thread or not self.sync_thread.is_alive()):
+            self.sync_thread = threading.Thread(target=self.sync_run, daemon=True, name='source-check-sync')
+            self.sync_thread.start()
         if not self.thread or not self.thread.is_alive():
             self.thread = threading.Thread(target=self.run, daemon=True, name='source-checker')
             self.thread.start()

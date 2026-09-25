@@ -61,6 +61,7 @@ STORE = storemod.Store(origin=clustermod.NODE_ID)
 CLUSTER = clustermod.Cluster(STORE)
 PERSONAL = personal.Registry(storemod.DB_FILE)
 SOURCE_CHECKER = source_checks.Checker(storemod.DB_FILE, STORE)
+SOURCE_CHECKER.cluster = CLUSTER
 subs.checked_source_reader = SOURCE_CHECKER.body
 _PORTAL_SECRET = (clustermod.CLUSTER_SECRET or secrets.token_urlsafe(32)).encode()
 
@@ -408,7 +409,7 @@ class _Base(BaseHTTPRequestHandler):
 
     # peer-API кластера (HMAC). Обслуживается и на cluster-порту, и на admin-порту
     # (чтобы узлы ходили друг к другу через статичный admin-домен по 443).
-    CLUSTER_API_PATHS = ("/cluster/ping", "/cluster/members", "/cluster/stats", "/cluster/personal")
+    CLUSTER_API_PATHS = ("/cluster/ping", "/cluster/members", "/cluster/stats", "/cluster/personal", "/cluster/source-checks")
 
     @staticmethod
     def is_cluster_api(path):
@@ -434,6 +435,8 @@ class _Base(BaseHTTPRequestHandler):
             self._json(200, CLUSTER.ping_view())
         elif path == "/cluster/members":
             self._json(200, CLUSTER.members_doc())
+        elif path == "/cluster/source-checks":
+            self._json(200, SOURCE_CHECKER.snapshot())
         elif path == "/cluster/stats":
             self._json(200, CLUSTER.stats_doc())
         elif path == "/cluster/reset-stats":
