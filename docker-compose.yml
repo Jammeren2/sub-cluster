@@ -36,6 +36,7 @@ services:
       SUB_PORT: "8081"
       CLUSTER_PORT: "${CLUSTER_PORT:-1753}"
       DB_FILE: "/data/cluster.db"
+      DATABASE_URL: "${DATABASE_URL:-}"
       PYTHONUNBUFFERED: "1"
       # Идентичность узла и секреты — задай в Coolify (Environment Variables):
       #   NODE_ID, NODE_LABEL, NODE_PUBLIC_IP, NODE_PRIORITY, PEERS,

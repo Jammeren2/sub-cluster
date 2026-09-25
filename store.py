@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-store.py — локальное хранилище конфигурации на SQLite с LWW-синхронизацией.
+store.py — PostgreSQL shared storage or legacy SQLite with LWW sync.
+
+DATABASE_URL enables authoritative shared transactions for all nodes. The
+SQLite/LWW description below applies only when DATABASE_URL is empty.
 
 Каждый узел кластера держит свою SQLite-БД. Документы («config» и «failover»)
 версионируются и синхронизируются между узлами по принципу last-write-wins:
@@ -20,6 +23,7 @@ import json
 import time
 import sqlite3
 import threading
+import database
 
 DB_FILE = os.environ.get("DB_FILE", os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "cluster.db"))
@@ -87,41 +91,51 @@ class Store:
     def __init__(self, db_file=DB_FILE, origin="node"):
         self.db_file = db_file
         self.origin = origin
-        self._lock = threading.RLock()
-        os.makedirs(os.path.dirname(db_file) or ".", exist_ok=True)
-        self._conn = sqlite3.connect(db_file, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS kv ("
-            " key TEXT PRIMARY KEY, data TEXT NOT NULL,"
-            " version INTEGER NOT NULL, updated_at REAL NOT NULL, origin TEXT NOT NULL)"
-        )
-        # Статистика по устройствам на маршрутах — ЛОКАЛЬНАЯ (не синкается между
-        # узлами): каждый узел считает запросы, что пришли к нему.
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS device_seen ("
-            " route_id TEXT NOT NULL, device TEXT NOT NULL, hwid TEXT, model TEXT,"
-            " app TEXT, ip TEXT, cnt INTEGER NOT NULL DEFAULT 0,"
-            " first_ts REAL, last_ts REAL, PRIMARY KEY(route_id, device))"
-        )
-        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(device_seen)")}
-        if "personal_name" not in columns:
-            self._conn.execute("ALTER TABLE device_seen ADD COLUMN personal_name TEXT NOT NULL DEFAULT ''")
-        if "personal_contact" not in columns:
-            self._conn.execute("ALTER TABLE device_seen ADD COLUMN personal_contact TEXT NOT NULL DEFAULT ''")
-        self._conn.commit()
-        self._ensure("config", DEFAULT_CONFIG)
-        self._ensure("failover", DEFAULT_FAILOVER)
-        self._ensure("members", DEFAULT_MEMBERS)
-        # high-water mark версий (Lamport-часы): наибольшая версия, которую узел
-        # когда-либо видел — локально или принятая от пира. Запись делаем от неё,
-        # чтобы конкурентные правки не сталкивались на одном номере и причинно
-        # более поздняя правка всегда побеждала на поле version (а не по часам).
-        self._hw = {}
-        for k in ("config", "failover", "members"):
-            m = self.get_meta(k)
-            if m:
-                self._hw[k] = m["version"]
+        self.shared = database.shared()
+        if self.shared:
+            self._conn = database.StoreConnection()
+            self._lock = database.StoreLock(self._conn)
+        else:
+            self._lock = threading.RLock()
+            os.makedirs(os.path.dirname(db_file) or ".", exist_ok=True)
+            self._conn = sqlite3.connect(db_file, check_same_thread=False)
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS kv ("
+                " key TEXT PRIMARY KEY, data TEXT NOT NULL,"
+                " version INTEGER NOT NULL, updated_at REAL NOT NULL, origin TEXT NOT NULL)"
+            )
+            # Статистика по устройствам на маршрутах — ЛОКАЛЬНАЯ (не синкается между
+            # узлами): каждый узел считает запросы, что пришли к нему.
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS device_seen ("
+                " route_id TEXT NOT NULL, device TEXT NOT NULL, hwid TEXT, model TEXT,"
+                " app TEXT, ip TEXT, cnt INTEGER NOT NULL DEFAULT 0,"
+                " first_ts REAL, last_ts REAL, PRIMARY KEY(route_id, device))"
+            )
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(device_seen)")}
+            if "personal_name" not in columns:
+                self._conn.execute("ALTER TABLE device_seen ADD COLUMN personal_name TEXT NOT NULL DEFAULT ''")
+            if "personal_contact" not in columns:
+                self._conn.execute("ALTER TABLE device_seen ADD COLUMN personal_contact TEXT NOT NULL DEFAULT ''")
+            if self.shared:
+                self._conn.execute("ALTER TABLE device_seen ADD COLUMN IF NOT EXISTS node_ids TEXT NOT NULL DEFAULT '[]'")
+                self._conn.execute('CREATE TABLE IF NOT EXISTS admin_login_limits(ip_hash TEXT PRIMARY KEY,failures INTEGER NOT NULL,locked_until REAL NOT NULL,touched REAL NOT NULL)')
+                self._conn.execute('CREATE TABLE IF NOT EXISTS admin_sessions(token_hash TEXT PRIMARY KEY,exp REAL NOT NULL,csrf TEXT NOT NULL)')
+            self._conn.commit()
+            self._ensure("config", DEFAULT_CONFIG)
+            self._ensure("failover", DEFAULT_FAILOVER)
+            self._ensure("members", DEFAULT_MEMBERS)
+            # high-water mark версий (Lamport-часы): наибольшая версия, которую узел
+            # когда-либо видел — локально или принятая от пира. Запись делаем от неё,
+            # чтобы конкурентные правки не сталкивались на одном номере и причинно
+            # более поздняя правка всегда побеждала на поле version (а не по часам).
+            self._hw = {}
+            for k in ("config", "failover", "members"):
+                m = self.get_meta(k)
+                if m:
+                    self._hw[k] = m["version"]
 
     def _next_version(self, key, local_version):
         nv = max(self._hw.get(key, 0), local_version) + 1
@@ -196,6 +210,8 @@ class Store:
             return data
 
     def merge_remote(self, key, remote):
+        if self.shared:
+            return False
         """Принять удалённую версию, если она «новее» по (version,updated_at,origin).
         remote = {data,version,updated_at,origin}. → True если приняли."""
         if not remote or "data" not in remote:
@@ -265,6 +281,8 @@ class Store:
         return self.update("failover", mutator)
 
     def merge_failover(self, remote_meta):
+        if self.shared:
+            return False
         """Поэлементное слияние failover, чтобы конкурентные записи разных узлов
         (и разных доменов) не затирали друг друга:
         - domains[did] — поэлементно по своему last_ts (per-domain переключения);
@@ -382,6 +400,8 @@ class Store:
             self._write("members", data, self._next_version("members", m["version"] if m else 0), time.time(), origin)
 
     def merge_members(self, remote_nodes):
+        if self.shared:
+            return False
         """Слить удалённые записи участников поэлементно (адоптим более новые)."""
         if not isinstance(remote_nodes, dict):
             return False
@@ -428,6 +448,10 @@ class Store:
                 " personal_contact=CASE WHEN excluded.personal_name != '' THEN excluded.personal_contact ELSE device_seen.personal_contact END",
                 (route_id, device, hwid, model, app, ip, now, now, str(personal_name or "")[:80], str(personal_contact or "")[:160], now),
             )
+            if self.shared:
+                row = self._conn.execute('SELECT node_ids FROM device_seen WHERE route_id=? AND device=?', (route_id, device)).fetchone()
+                nodes = sorted(set(json.loads(row[0])) | {self.origin})
+                self._conn.execute('UPDATE device_seen SET node_ids=? WHERE route_id=? AND device=?', (json.dumps(nodes), route_id, device))
             # держим не более N последних устройств на маршрут
             self._conn.execute(
                 "DELETE FROM device_seen WHERE route_id=? AND device NOT IN ("
@@ -509,11 +533,12 @@ class Store:
         """Сырые строки статистики этого узла (для отдачи пирам)."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts,personal_name,personal_contact FROM device_seen"
+                "SELECT route_id,device,hwid,model,app,ip,cnt,first_ts,last_ts,personal_name,personal_contact"
+                + (",node_ids" if self.shared else "") + " FROM device_seen"
                 " ORDER BY last_ts DESC LIMIT 5000"
             ).fetchall()
         return [{"route_id": r[0], "device": r[1], "hwid": r[2], "model": r[3], "app": r[4],
-                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8], "personal_name": r[9], "personal_contact": r[10]} for r in rows]
+                 "ip": r[5], "cnt": r[6], "first_ts": r[7], "last_ts": r[8], "personal_name": r[9], "personal_contact": r[10], "nodes": json.loads(r[11]) if self.shared else [self.origin]} for r in rows]
 
     def reset_stats(self, route_id=None):
         with self._lock:

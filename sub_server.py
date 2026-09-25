@@ -41,6 +41,7 @@ import gateway
 import provision
 import personal
 import portal
+import database
 import source_checks
 
 # ── окружение ──────────────────────────────────────────────────────────────
@@ -80,11 +81,11 @@ def valid_portal_csrf(token, route, host):
 
 
 def personal_operation(route, payload, remote=False):
-    """Forward to the fixed owner; never create a competing local registry."""
+    """Shared mode serves locally; legacy mode forwards to the fixed owner."""
     owner = route.get("personal_owner")
-    if not owner:
+    if not owner and not STORE.shared:
         raise personal.PersonalError("Администратору нужно сохранить личный маршрут ещё раз.", 503)
-    if owner != CLUSTER.id:
+    if not STORE.shared and owner != CLUSTER.id:
         if remote:
             raise personal.PersonalError("Настройки кластера обновляются. Повторите позже.", 503)
         node = CLUSTER.find_node(owner)
@@ -158,6 +159,9 @@ _sessions = {}
 def create_session():
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(24)
+    if STORE.shared:
+        database.session_put(token, time.time() + SESSION_TTL, csrf)
+        return token, csrf
     with _sessions_lock:
         _sessions[token] = {"exp": time.time() + SESSION_TTL, "csrf": csrf}
     return token, csrf
@@ -166,6 +170,8 @@ def create_session():
 def get_session(token):
     if not token:
         return None
+    if STORE.shared:
+        return database.session_get(token)
     with _sessions_lock:
         s = _sessions.get(token)
         if not s:
@@ -177,6 +183,9 @@ def get_session(token):
 
 
 def drop_session(token):
+    if STORE.shared:
+        database.session_delete(token)
+        return
     with _sessions_lock:
         _sessions.pop(token, None)
 
@@ -197,6 +206,8 @@ LOGIN_LOCK_SECONDS = int(os.environ.get("LOGIN_LOCK_SECONDS", "300"))
 
 
 def login_blocked(ip):
+    if STORE.shared:
+        return database.login_blocked(ip)
     now = time.time()
     with _login_lock:
         rec = _login_fails.get(ip)
@@ -206,6 +217,8 @@ def login_blocked(ip):
 
 
 def login_register(ip, success):
+    if STORE.shared:
+        return database.login_register(ip, success, LOGIN_MAX_FAILS, LOGIN_LOCK_SECONDS)
     now = time.time()
     with _login_lock:
         # подчистим протухшие блокировки, чтобы словарь не рос
@@ -344,6 +357,13 @@ def _normalize_zapret(data):
 
 # ── базовый обработчик ─────────────────────────────────────────────────────
 class _Base(BaseHTTPRequestHandler):
+    def handle_one_request(self):
+        try:
+            return super().handle_one_request()
+        except database.DatabaseUnavailable:
+            self.close_connection = True
+            self._respond(503, "Общая база временно недоступна. Повторите позже.".encode())
+
     protocol_version = "HTTP/1.1"
     server_version = "subcluster/3.0"
 
@@ -484,6 +504,8 @@ class AdminHandler(_Base):
     def do_GET(self):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/healthz":
+            if STORE.shared:
+                STORE.get_meta("config")
             self._respond(200, b"ok")
             return
         # ask-эндпоинт для on-demand TLS Caddy: разрешаем только наши домены.
@@ -892,6 +914,8 @@ class SubHandler(_Base):
     def do_GET(self):
         raw_path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if raw_path == "/healthz":
+            if STORE.shared:
+                STORE.get_meta("config")
             self._respond(200, b"ok")
             return
         route, slug = self._public_route()
@@ -956,6 +980,8 @@ class ClusterHandler(_Base):
         path = self.path.split("?", 1)[0]
         body = self._read_body()
         if path == "/healthz":
+            if STORE.shared:
+                STORE.get_meta("config")
             self._respond(200, b"ok")
             return
         self._serve_cluster_api(path, body)

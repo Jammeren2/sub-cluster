@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 
 import subscriptions as subs
+import database
 
 PUBLIC_FEED = 'https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt'
 PREFIX = 'Небезопасный · '
@@ -198,6 +199,9 @@ def probe(link):
 class Checker:
     def __init__(self, db_file, store):
         self.db_file, self.store = db_file, store
+        self.shared = database.shared()
+        self.node = store.origin
+        self.schema = database.initialize_checker(self.node) if self.shared else 'public'
         self.stop = threading.Event()
         self.thread = None
         self.cluster = None
@@ -206,6 +210,7 @@ class Checker:
         self.engine_error = ""
         self.samples = collections.deque(maxlen=10000)
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS checked_sources(url TEXT PRIMARY KEY, refreshed REAL NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT "")')
             db.execute('CREATE TABLE IF NOT EXISTS checked_links(url TEXT, key TEXT, link TEXT, position INTEGER, checked REAL NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT "pending", country TEXT NOT NULL DEFAULT "", exit_ip TEXT NOT NULL DEFAULT "", PRIMARY KEY(url,key))')
             columns = {r[1] for r in db.execute('PRAGMA table_info(checked_links)')}
@@ -218,13 +223,8 @@ class Checker:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.db_file, timeout=15)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        with database.connect(self.db_file, schema=self.schema, scope='checker:' + self.node, mapped=True) as db:
+            yield db
 
     def ingest(self, url, body):
         links = subs.extract_links(body)
@@ -258,6 +258,8 @@ class Checker:
                            [(url, key, link, pos) for pos, (key, link) in enumerate(ordered)])
             db.executemany('UPDATE checked_links SET state="unsupported",checked=?,lease_until=0 WHERE url=? AND key=?', unsupported)
             db.execute('DELETE FROM checked_links WHERE url=? AND key NOT IN (SELECT key FROM current_keys)', (url,))
+            if self.shared:
+                db.execute('DELETE FROM public.source_observations WHERE node=? AND url=? AND key NOT IN (SELECT key FROM checked_links WHERE url=? AND state="ok")', (self.node, url, url))
             db.execute('INSERT INTO checked_sources(url,refreshed,error) VALUES(?,?,"") ON CONFLICT(url) DO UPDATE SET refreshed=excluded.refreshed,error=""', (url, time.time()))
 
     def refresh(self, url):
@@ -325,7 +327,8 @@ class Checker:
         cutoff = time.time() - TTL
         with self.connect() as db:
             local = db.execute('SELECT link,country,key,checked FROM checked_links WHERE url=? AND state="ok" AND checked>? ORDER BY position', (url, cutoff)).fetchall()
-            remote = db.execute('SELECT node,link,country,key,checked FROM checked_peer_links WHERE url=? AND checked>? ORDER BY node,key', (url, cutoff)).fetchall()
+            table = 'public.source_observations' if self.shared else 'checked_peer_links'
+            remote = db.execute('SELECT node,link,country,key,checked FROM ' + table + ' WHERE url=? AND checked>? ORDER BY node,key', (url, cutoff)).fetchall()
         allowed = self.peer_ids()
         merged = {r['key']: dict(r) for r in local}
         for row in remote:
@@ -378,7 +381,7 @@ class Checker:
             db.execute('INSERT OR REPLACE INTO checked_peer_snapshots VALUES(?,?)', (node, stamp))
 
     def sync_once(self):
-        if self.cluster is None:
+        if self.cluster is None or self.shared:
             return
         nodes = [n for n in self.cluster.get_nodes() if n['id'] != self.cluster.id]
         for node in nodes:
@@ -438,6 +441,11 @@ class Checker:
         with self.connect() as db:
             db.execute('UPDATE checked_links SET checked=?,state=?,country=?,exit_ip=?,lease_until=0 WHERE url=? AND key=?',
                        (time.time(), state, result.get('country', ''), result.get('exit_ip', ''), row['url'], row['key']))
+            if self.shared:
+                if state == 'ok':
+                    db.execute('INSERT INTO public.source_observations(node,url,key,link,checked,country) VALUES(?,?,?,?,?,?) ON CONFLICT(node,url,key) DO UPDATE SET link=excluded.link,checked=excluded.checked,country=excluded.country', (self.node, row['url'], row['key'], row['link'], time.time(), result['country']))
+                else:
+                    db.execute('DELETE FROM public.source_observations WHERE node=? AND url=? AND key=?', (self.node, row['url'], row['key']))
         self.samples.append((time.time(), row['url']))
 
     def run(self):
@@ -467,6 +475,8 @@ class Checker:
                             for old in set(existing) - set(urls):
                                 db.execute('DELETE FROM checked_links WHERE url=?', (old,))
                                 db.execute('DELETE FROM checked_sources WHERE url=?', (old,))
+                                if self.shared:
+                                    db.execute('DELETE FROM public.source_observations WHERE node=? AND url=?', (self.node, old))
                     except Exception as exc:
                         self.engine_error = str(exc) if isinstance(exc, EngineUnavailable) else 'Сбой проверки; очередь будет повторена'
                         if engine:
@@ -474,8 +484,11 @@ class Checker:
                             engine = None
                     finally:
                         if rows:
-                            with self.connect() as db:
-                                db.executemany('UPDATE checked_links SET lease_until=0 WHERE url=? AND key=?', [(r['url'], r['key']) for r in rows])
+                            try:
+                                with self.connect() as db:
+                                    db.executemany('UPDATE checked_links SET lease_until=0 WHERE url=? AND key=?', [(r['url'], r['key']) for r in rows])
+                            except database.DatabaseUnavailable:
+                                pass  # Lease expiry recovers claims when the database returns.
                     self.stop.wait(5 if self.engine_error else (.05 if rows else 1))
         finally:
             if engine:
@@ -495,7 +508,7 @@ class Checker:
             self.store.update_config(mutate)
 
     def start(self):
-        if self.cluster is not None and (not self.sync_thread or not self.sync_thread.is_alive()):
+        if not self.shared and self.cluster is not None and (not self.sync_thread or not self.sync_thread.is_alive()):
             self.sync_thread = threading.Thread(target=self.sync_run, daemon=True, name='source-check-sync')
             self.sync_thread.start()
         if not self.thread or not self.thread.is_alive():

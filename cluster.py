@@ -234,6 +234,8 @@ class Cluster:
             return None
 
     def pull_peer(self, base):
+        if self.store.shared:
+            return
         if not base:
             return
         # config — LWW на весь документ
@@ -628,6 +630,8 @@ class Cluster:
     def reset_stats_cluster(self, route_id=None):
         """Сбросить статистику локально и разослать сброс живым узлам."""
         self.store.reset_stats(route_id)
+        if self.store.shared:
+            return
         settings = self.store.get_settings()
         alive = self.alive_ids(self.get_nodes(), int(settings.get("fail_threshold", 3)))
         for n in self.get_nodes():
@@ -650,7 +654,7 @@ class Cluster:
         nodes = self.get_nodes()
         alive = self.alive_ids(nodes, int(settings.get("fail_threshold", 3)))
         sources = [(self.id, self.store.get_stats_rows())]
-        for n in nodes:
+        for n in ([] if self.store.shared else nodes):
             nid = n.get("id")
             if nid == self.id or nid not in alive:
                 continue
@@ -685,7 +689,7 @@ class Cluster:
                 ft = float(r.get("first_ts") or 0)
                 if ft and (not e["first_ts"] or ft < e["first_ts"]):
                     e["first_ts"] = ft
-                e["nodes"].add(node_id)
+                e["nodes"].update(r.get("nodes") or [node_id])
         out = {}
         for e in agg.values():
             ro = out.setdefault(e["route_id"], {"requests": 0, "devices": []})

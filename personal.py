@@ -1,4 +1,5 @@
-"""Personal subscription registry. All operations run on a route's fixed owner.
+"""Personal subscription registry. PostgreSQL operations can run on any node.
+Legacy SQLite operations run on the fixed owner.
 
 SQLite transactions serialize first-device claims. Never elect a replacement owner
 on an outage: doing so without consensus would permit a second device binding.
@@ -17,6 +18,7 @@ import urllib.parse
 import urllib.request
 
 import subscriptions as subs
+import database
 
 EXEMPT_IPS = {"37.193.168.134", "90.189.209.31"}
 HWID_MESSAGE = "Ваш VPN-клиент не передаёт корректный HWID устройства или использует IP вместо него. Используйте другой VPN-клиент, например Happ."
@@ -178,6 +180,7 @@ class Registry:
     def __init__(self, db_file):
         self.db_file = db_file
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS personal_links (route TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL, selected TEXT NOT NULL, manage_hash TEXT NOT NULL, device_hash TEXT NOT NULL DEFAULT "", created REAL NOT NULL, PRIMARY KEY(route,slug))')
             columns = {row[1] for row in db.execute("PRAGMA table_info(personal_links)")}
             if "contact" not in columns:
@@ -187,12 +190,8 @@ class Registry:
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.db_file, timeout=15)
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        with database.connect(self.db_file, scope='personal') as db:
+            yield db
 
     def limit(self, ip, limit=12):
         bucket = hashlib.sha256(ip.encode()).hexdigest()
