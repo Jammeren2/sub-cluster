@@ -15,6 +15,8 @@ import gzip
 import json
 import time
 import uuid
+import hashlib
+import hmac
 import base64
 import threading
 import urllib.request
@@ -26,17 +28,29 @@ UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "20"))
 # Значение можно увеличить, но не уменьшить ниже трёх часов.
 CACHE_TTL = max(10800, int(os.environ.get("CACHE_TTL", "10800")))
 
-# HWID/device — НЕ хардкодим реальный отпечаток. По умолчанию генерируем случайный
-# (стабильный в пределах запуска); для стабильности между рестартами задай HAPP_HWID.
+# A shared secret gives all cluster nodes the same upstream identity, independent
+# of NODE_ID, host IP and restarts. Never send the cluster secret itself upstream.
+def upstream_hwid(environ=None):
+    env = os.environ if environ is None else environ
+    explicit = env.get("HAPP_HWID", "").strip()
+    if explicit:
+        return explicit
+    secret = env.get("CLUSTER_SECRET", "")
+    if secret:
+        digest = hmac.new(secret.encode(), b"sub-cluster/upstream-device/v1", hashlib.sha256).digest()
+        return str(uuid.UUID(bytes=digest[:16], version=4))
+    return _DEFAULT_HWID
+
+
 _DEFAULT_HWID = str(uuid.uuid4())
 
 UPSTREAM_HEADERS = {
-    "User-Agent": os.environ.get("HAPP_UA", "Happ/2.16.2/Windows/2605221224603"),
-    "X-App-Version": os.environ.get("HAPP_VERSION", "2.16.2"),
+    "User-Agent": os.environ.get("HAPP_UA") or "Happ/2.16.2/Windows/2605221224603",
+    "X-App-Version": os.environ.get("HAPP_VERSION") or "2.16.2",
     "X-Device-Locale": "RU",
     "X-Device-Os": "Windows",
-    "X-Device-Model": os.environ.get("HAPP_DEVICE_MODEL", "DESKTOP-0000000_x86_64"),
-    "X-Hwid": os.environ.get("HAPP_HWID") or _DEFAULT_HWID,
+    "X-Device-Model": os.environ.get("HAPP_DEVICE_MODEL") or "DESKTOP-0000000_x86_64",
+    "X-Hwid": upstream_hwid(),
     "X-Ver-Os": "10_10.0.19045",
     "Connection": "Keep-Alive",
     "Accept-Encoding": "gzip, deflate",
