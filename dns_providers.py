@@ -19,6 +19,7 @@ reg.ru REG.API 2.0:
 """
 
 import os
+import ipaddress
 import json
 import urllib.parse
 import urllib.request
@@ -116,24 +117,47 @@ class RegRuProvider(DnsProvider):
         return True, "ok"
 
     def set_a_record(self, zone, subdomain, ip):
-        # 1) убрать старую A-запись поддомена (если её нет — reg.ru вернёт ошибку,
-        #    которую мы трактуем как «нечего удалять»).
+        # Add and verify the destination BEFORE removing individual old addresses.
+        # A failed API request must never leave the subscription name without A records.
         try:
-            self._call("zone/remove_record", {
-                "domain_name": zone, "subdomain": subdomain, "record_type": "A",
-            })
-        except Exception as e:
-            # удаление не критично; продолжаем к добавлению
-            print(f"[dns] remove_record {subdomain}.{zone}: {e}", flush=True)
-        # 2) добавить новую A-запись.
-        try:
-            parsed = self._call("zone/add_alias", {
-                "domain_name": zone, "subdomain": subdomain, "ipaddr": ip,
-            })
+            ip = str(ipaddress.IPv4Address(ip))
+            addresses = self.a_records(zone, subdomain)
+            if ip not in addresses:
+                parsed = self._call("zone/add_alias", {
+                    "domain_name": zone, "subdomain": subdomain, "ipaddr": ip,
+                })
+                ok, msg = self._domain_ok(parsed)
+                if not ok:
+                    return DnsResult(False, msg)
+                addresses = self.a_records(zone, subdomain)
+                if ip not in addresses:
+                    return DnsResult(False, "новая A-запись ещё не подтверждена API")
+            for old in sorted(addresses - {ip}):
+                parsed = self._call("zone/remove_record", {
+                    "domain_name": zone, "subdomain": subdomain,
+                    "record_type": "A", "content": old,
+                })
+                ok, msg = self._domain_ok(parsed)
+                if not ok:
+                    return DnsResult(False, msg)
+            if self.a_records(zone, subdomain) != {ip}:
+                return DnsResult(False, "A-записи после переключения не совпадают с выбранным IP")
         except Exception as e:
             return DnsResult(False, f"сеть/API: {e}")
+        return DnsResult(True, "ok")
+
+    def a_records(self, zone, subdomain):
+        """Strict read for failover: an API failure is not an empty DNS zone."""
+        parsed = self._call("zone/get_resource_records", {"domain_name": zone})
         ok, msg = self._domain_ok(parsed)
-        return DnsResult(ok, msg, parsed)
+        if not ok:
+            raise RuntimeError(msg)
+        domains = (parsed.get("answer") or {}).get("domains") or []
+        matching = [d for d in domains if str(d.get("dname", "")).lower().rstrip('.') == zone.lower().rstrip('.')]
+        if len(matching) != 1 or not isinstance(matching[0].get("rrs"), list):
+            raise RuntimeError("API не вернул записи запрошенной зоны")
+        return {str(rr.get("content", "")) for rr in matching[0]['rrs']
+                if rr.get("rectype") == "A" and str(rr.get("subname", "")).lower() == subdomain.lower()}
 
     def get_records(self, zone):
         try:

@@ -594,6 +594,7 @@ def render_settings(settings, nodes, flash="", flash_err=False, crypto_ok=True,
 <fieldset><legend>Фейловер</legend>
   <label class="row"><input type="checkbox" name="failover_enabled" value="1" style="width:auto"{chk(settings.get('failover_enabled'))}> <span>Авто-фейловер включён</span></label>
   <label class="row" style="margin-top:8px"><input type="checkbox" name="require_quorum" value="1" style="width:auto"{chk(settings.get('require_quorum'))}> <span>Требовать кворум для захвата мёртвого активного (защита от split-brain)</span></label>
+  <div class="help">Для двух узлов кворум блокирует переключение после отказа одного. Без кворума DNS может переключаться при разрыве связи между узлами. Проверяется HTTPS /healthz домена подписок на конкретном IP, включая сертификат и доступность БД. Это не переключение PostgreSQL. Старые DNS-ответы действуют до истечения TTL.</div>
   <label class="row" style="margin-top:8px"><input type="checkbox" name="preempt" value="1" style="width:auto"{chk(settings.get('preempt'))}> <span>Возвращать DNS самому приоритетному живому узлу (failback)</span></label>
   <div class="grid2" style="margin-top:8px">
     <div><label>Интервал опроса, сек</label><input name="poll_interval" type="number" value="{esc(settings.get('poll_interval',10))}"></div>

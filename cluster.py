@@ -24,6 +24,8 @@ import secrets
 import threading
 import urllib.request
 import urllib.error
+import http.client
+from concurrent.futures import ThreadPoolExecutor
 
 import secretbox
 import dns_providers
@@ -100,6 +102,9 @@ class Cluster:
         self._lock = threading.Lock()
         # id -> {alive,last_ok,fails,latency,view(list),active,ts}
         self.liveness = {}
+        self.subscription_health = {}
+        self._subscription_views = {}
+        self._dns_audit_at = {}
         self._nonce_seen = {}  # nonce -> expiry (защита от повторного проигрывания)
         self._stop = threading.Event()
         self._thread = None
@@ -220,6 +225,7 @@ class Cluster:
                     "alive": True, "last_ok": time.time(), "fails": 0,
                     "latency": latency, "view": data.get("alive", []),
                     "active": data.get("active"), "ts": time.time(),
+                    "subscription_alive": data.get("subscription_alive", {}),
                 }
             return data
         except Exception:
@@ -304,7 +310,51 @@ class Cluster:
         for n in order:  # все живые заблокированы — пробуем хоть кого-то
             if n.get("id") in alive:
                 return n.get("id")
-        return self.id if self._self_enabled() else None
+        return None
+
+    def _subscription_ready(self, domain, node):
+        """Probe the exact origin IP with the subscription Host/SNI, never round-robin DNS."""
+        base = graph.domain_public_base(domain)
+        parsed = urllib.parse.urlsplit(base)
+        ip = node.get('public_ip')
+        if not parsed.hostname or not ip or parsed.scheme not in ('http', 'https'):
+            return False
+        connection = None
+        try:
+            if parsed.scheme == 'https':
+                connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443,
+                                                        timeout=self.http_timeout, context=_SSL_CTX)
+                # Keep the hostname for TLS verification and Host; pin only the TCP address.
+                connection._create_connection = lambda address, timeout, source_address=None: socket.create_connection(
+                    (ip, address[1]), timeout, source_address)
+            else:
+                connection = http.client.HTTPConnection(ip, parsed.port or 80, timeout=self.http_timeout)
+            connection.request('GET', '/healthz', headers={'Host': parsed.netloc, 'Connection': 'close'})
+            response = connection.getresponse()
+            return response.status == 200 and response.read(16).strip() == b'ok'
+        except Exception:
+            return False
+        finally:
+            if connection:
+                connection.close()
+
+    def _subscription_alive(self, domain, nodes, alive, fail_threshold):
+        candidates = [n for n in nodes if n.get('id') in alive]
+        ready = set()
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = executor.map(lambda n: self._subscription_ready(domain, n), candidates)
+            for node, ok in zip(candidates, results):
+                nid = node['id']
+                key = (domain['id'], nid)
+                previous = self.subscription_health.get(key, {})
+                fails = 0 if ok else previous.get('fails', 0) + 1
+                self.subscription_health[key] = {'fails': fails}
+                # Never publish ourselves while our own subscription endpoint is failing.
+                if ok or (nid != self.id and fails < fail_threshold):
+                    ready.add(nid)
+        with self._lock:
+            self._subscription_views[domain['id']] = sorted(ready)
+        return ready
 
     def _has_alive_majority(self, nodes, alive):
         total = len(nodes) or 1
@@ -331,7 +381,7 @@ class Cluster:
                 blocked.add(nid)
         return blocked
 
-    def _quorum_active_dead(self, active, nodes, alive):
+    def _quorum_active_dead(self, active, nodes, alive, domain_id=None):
         total = len(nodes) or 1
         majority = total // 2 + 1
         agree = 0
@@ -343,7 +393,8 @@ class Cluster:
                 if nid == self.id:
                     continue
                 lv = self.liveness.get(nid)
-                if lv and lv.get("alive") and active not in (lv.get("view") or []):
+                view = ((lv or {}).get('subscription_alive') or {}).get(domain_id) if domain_id else (lv or {}).get('view')
+                if lv and lv.get("alive") and view is not None and active not in view:
                     agree += 1
         return agree >= majority
 
@@ -575,16 +626,24 @@ class Cluster:
                 continue
             did = domain["id"]
             is_default = (did == default_id)
+            domain_alive = self._subscription_alive(domain, nodes, alive, fail_threshold)
             dfo = self.store.get_domain_failover(fo, did)
             blocked = self._blocked_nodes_fc(dfo["fail_counts"], settings)
-            cand = self.best_alive_for_domain(domain, nodes, alive, blocked)
+            cand = self.best_alive_for_domain(domain, nodes, domain_alive, blocked)
             active = dfo["active"]
-            desired = pinned if (pinned and pinned in alive) else cand
-            if desired != self.id or active == self.id:
+            # Repair stale/manual round-robin records even when metadata already names us.
+            # Only the active, ready node audits; this also works with preemption disabled.
+            if active == self.id and self.id in domain_alive:
+                if now - self._dns_audit_at.get(did, 0) >= 300 and now - float(dfo['last_ts']) >= cooldown:
+                    self._dns_audit_at[did] = now
+                    self.seize_domain(domain, is_default, by='auto-reconcile')
+                continue
+            desired = pinned if (pinned and pinned in domain_alive) else cand
+            if desired != self.id:
                 continue
             cooldown_ok = (now - float(dfo["last_ts"])) >= cooldown
             active_valid = active is not None and active in node_ids
-            active_alive = active in alive
+            active_alive = active in domain_alive
 
             if pinned == self.id:
                 # ручной пин на нас — берём DNS себе (без кворума)
@@ -605,7 +664,7 @@ class Cluster:
             if not active_alive:
                 # активный мёртв — фейловер с защитой от split-brain (кворум)
                 if settings.get("require_quorum", True) \
-                        and not self._quorum_active_dead(active, nodes, alive):
+                        and not self._quorum_active_dead(active, nodes, domain_alive, did):
                     continue
                 if cooldown_ok:
                     self.seize_domain(domain, is_default, by="auto")
@@ -711,6 +770,7 @@ class Cluster:
             "ts": time.time(),
             "alive": sorted(alive),
             "active": fo.get("active"),
+            "subscription_alive": dict(self._subscription_views),
         }
 
     def status(self):
