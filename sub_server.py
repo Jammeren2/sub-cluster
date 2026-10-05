@@ -128,9 +128,16 @@ def personal_operation(route, payload, remote=False):
     if op in ("create", "update"):
         selected = payload.get("selected")
         valid = {item["id"] for item in items}
-        if not isinstance(selected, list) or not selected or len(selected) > 1000 or any(not isinstance(x, str) or x not in valid for x in selected):
+        previous = set(details['selected']) if op == 'update' else set()
+        if not isinstance(selected, list) or len(selected) > 1000 or any(not isinstance(x, str) or x not in valid | previous for x in selected):
             raise personal.PersonalError("Выберите доступные серверы. Если список изменился, обновите страницу.")
         selected = list(dict.fromkeys(selected))
+        # A partial upstream catalog is not a request to forget absent choices.
+        # Preserve them even for older management pages that submit visible IDs only.
+        if op == 'update':
+            selected += [key for key in details['selected'] if key not in valid and key not in selected]
+        if not selected or len(selected) > 1000:
+            raise personal.PersonalError("Выберите хотя бы один сервер (не более 1000).")
         if op == "create":
             return {"ok": True, **PERSONAL.create(route["id"], payload.get("name"), slug, selected, contact=payload.get("contact"))}
         details = PERSONAL.access(route["id"], slug, token=payload.get("token") or "", selected=selected)

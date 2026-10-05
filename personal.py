@@ -144,7 +144,7 @@ def catalog(body):
 def selected_response(items, selected, headers, output_format, title):
     values = [item['value'] for item in items if item['id'] in set(selected)]
     if not values:
-        return notice('Обновите выбор серверов', 'Выбранные серверы больше недоступны. Откройте личную страницу управления и выберите другие.', output_format)
+        return notice(title, 'Выбранные серверы временно недоступны. Ваш выбор сохранён: после их возвращения обновите подписку. При желании можно выбрать дополнительные серверы на странице управления.', output_format)
     result_headers = dict(headers)
     result_headers['Cache-Control'] = 'no-store'
     result_headers['Profile-Title'] = subs._b64_header(title)

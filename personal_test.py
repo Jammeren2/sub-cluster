@@ -57,6 +57,34 @@ class PersonalTests(unittest.TestCase):
     def create(self, slug=None):
         return server.PERSONAL.create(self.route['id'], 'Alice', slug or '', [self.catalog[0]['id']])
 
+    def test_selection_survives_partial_catalog_save_and_return(self):
+        ids = [item['id'] for item in self.catalog]
+        link = server.PERSONAL.create(self.route['id'], 'Alice', '', ids)
+        payload = {'op': 'update', 'slug': link['slug'], 'token': link['token'], 'selected': [ids[1]]}
+        with patch.object(subs, 'build_route_response', return_value=(subs._b64list([LINK2]), {})):
+            result = server.personal_operation(self.route, payload)
+            self.assertEqual(set(result['selected']), set(ids))
+            # Current UI can send the saved absent ID too.
+            result = server.personal_operation(self.route, {**payload, 'selected': ids})
+            self.assertEqual(set(result['selected']), set(ids))
+            with self.assertRaises(personal.PersonalError):
+                server.personal_operation(self.route, {**payload, 'selected': ['unknown-id']})
+        result = server.personal_operation(self.route, {'op': 'fetch', 'slug': link['slug'], 'device': {'hwid': 'stable-device'}, 'claim': False})
+        self.assertEqual(set(subs.extract_links(base64.b64decode(result['body']))), {LINK1, LINK2})
+        # A deliberate removal of a visible choice still works.
+        result = server.personal_operation(self.route, payload)
+        self.assertEqual(result['selected'], [ids[1]])
+
+    def test_selection_survives_completely_empty_catalog(self):
+        link = self.create()
+        with patch.object(subs, 'build_route_response', return_value=(b'', {})):
+            result = server.personal_operation(self.route, {'op': 'update', 'slug': link['slug'], 'token': link['token'], 'selected': []})
+            self.assertEqual(result['selected'], link['selected'])
+            result = server.personal_operation(self.route, {'op': 'fetch', 'slug': link['slug'], 'device': {'hwid': 'stable-device'}})
+            announcement = result['headers'].get('Announce', result['headers'].get('announce', ''))
+            self.assertIn('выбор сохранён', base64.b64decode(announcement.removeprefix('base64:')).decode())
+        self.assertFalse(server.PERSONAL.access(self.route['id'], link['slug'], token=link['token'])['bound'])
+
     def test_defaults_and_editor_roundtrip(self):
         graph.add_route(server.STORE, '/public', 'Public', [], 'merge')
         self.assertEqual(graph.get_routes(server.STORE)[1]['access'], 'public')
@@ -418,7 +446,7 @@ class PersonalTests(unittest.TestCase):
         result=self.create()
         with patch('sub_server.subs.build_route_response',return_value=(b'',{})):
             response=server.personal_operation(self.route,{'op':'fetch','slug':result['slug'],'device':{'hwid':'A'},'format':'legacy'})
-        self.assertIn('выберите',base64.b64decode(response['headers']['Announce'][7:]).decode())
+        self.assertIn('выбор сохранён',base64.b64decode(response['headers']['Announce'][7:]).decode())
         self.assertFalse(server.PERSONAL.access(self.route['id'],result['slug'],token=result['token'])['bound'])
 
     def test_nested_routes_cannot_shadow_personal_links(self):
