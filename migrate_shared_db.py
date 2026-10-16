@@ -11,6 +11,7 @@ import time
 import database
 
 TABLES = ('kv', 'device_seen', 'personal_links', 'personal_limits', 'checked_sources', 'checked_links')
+CHOICE_TABLES = ('personal_choices', 'personal_choice_aliases', 'personal_ambiguous_choices')
 
 
 def read_snapshot(path):
@@ -19,7 +20,7 @@ def read_snapshot(path):
         db.row_factory = sqlite3.Row
         db.execute('BEGIN')
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        return {name: sorted([dict(r) for r in db.execute('SELECT * FROM ' + name)], key=lambda row: json.dumps(row, sort_keys=True)) if name in tables else [] for name in TABLES}
+        return {name: sorted([dict(r) for r in db.execute('SELECT * FROM ' + name)], key=lambda row: json.dumps(row, sort_keys=True)) if name in tables else [] for name in TABLES + tuple(name for name in CHOICE_TABLES if name in tables)}
 
 
 def import_snapshot(path, node, authoritative=False):
@@ -63,6 +64,14 @@ def import_snapshot(path, node, authoritative=False):
                 if old is None or version(row) > version(old):
                     members['nodes'][nid] = row
             db.execute("UPDATE kv SET data=?,version=version+1,updated_at=?,origin=? WHERE key='members'", (json.dumps(members), time.time(), node))
+        for table in CHOICE_TABLES:
+            key = 'old_id' if table == 'personal_choice_aliases' else 'identity'
+            fields = ('route', key) if table == 'personal_ambiguous_choices' else ('route', key, 'choice')
+            for row in data.get(table, []):
+                old = db.execute('SELECT * FROM ' + table + ' WHERE route=? AND ' + key + '=?', (row['route'], row[key])).fetchone()
+                if old and any(old[field] != row[field] for field in fields):
+                    raise ValueError('Conflicting stable personal choices; resolve snapshots before migration')
+                db.execute('INSERT INTO ' + table + '(' + ','.join(fields) + ') VALUES(' + ','.join('?' for _ in fields) + ') ON CONFLICT(route,' + key + ') DO NOTHING', tuple(row[field] for field in fields))
         for row in data['personal_links']:
             row = {**row, 'contact': row.get('contact', '')}
             existing = db.execute('SELECT * FROM personal_links WHERE route=? AND slug=? COLLATE NOCASE', (row['route'], row['slug'])).fetchall()

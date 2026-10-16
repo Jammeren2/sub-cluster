@@ -231,6 +231,8 @@ def fetch_upstream(url):
         return raw, headers
 
 
+
+
 def fetch_upstream_cached(url):
     """Общий кэш upstream + single-flight на URL.
 
@@ -1013,6 +1015,12 @@ def _gateway_link(domain, uuid_str, path=None, name="gateway", port=443):
     return f"vless://{uuid_str}@{domain}:{port}?{q}#{_urlquote(name or 'gateway')}"
 
 
+def selection_value_key(value):
+    """Internal key only; never add provenance or credentials to the wire payload."""
+    raw = json.dumps(value, sort_keys=True, ensure_ascii=False) if isinstance(value, dict) else value
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def build_merged_response(route, spec, announce=""):
     """Слияние подписок и прямых ключей в один ответ.
        spec = {"subs":[{"url","renames"}], "keys":[{"link","name"}]}.
@@ -1033,6 +1041,15 @@ def build_merged_response(route, spec, announce=""):
     seen_link = set()
     infos = []
     passthrough = {}
+    origins = spec.get('_personal_origins')
+    def remember(value, scope, fixed=False):
+        if origins is not None:
+            origin = {'scope': scope, 'fixed': fixed}
+            values = origins.setdefault(selection_value_key(value), [])
+            if origin not in values:
+                values.append(origin)
+    def source_scope(source):
+        return 'source:' + (source.get('source_id') or source.get('url') or 'direct')
 
     for sub in subs:
         url = (sub or {}).get("url")
@@ -1058,30 +1075,37 @@ def build_merged_response(route, spec, announce=""):
         cfgs = parsed if isinstance(parsed, list) else ([parsed] if isinstance(parsed, dict) else None)
         if cfgs is not None:
             for cfg in cfgs:
+                remember(cfg, source_scope(sub))
                 ident = _config_identity(cfg)
                 if ident not in seen_cfg:
                     seen_cfg.add(ident)
                     addr, name = _config_addr_name(cfg)
-                    json_items.append({"cfg": cfg, "addr": addr, "name": name, "renames": renames})
+                    json_items.append({"cfg": cfg, "addr": addr, "name": name, "renames": renames, 'scope': source_scope(sub)})
         else:
             for link in extract_links(body):
+                remember(link, source_scope(sub))
                 if link not in seen_link:
                     seen_link.add(link)
                     text_items.append({"link": link, "addr": _link_addr(link),
-                                       "name": _frag_name(link), "renames": renames})
+                                       "name": _frag_name(link), "renames": renames, 'scope': source_scope(sub)})
 
     # Переименования — отдельным проходом после дедупа (identity дедупа не трогаем).
     for it in json_items:
         new = _match_rename(it["addr"], it["name"], it["renames"])
         if new is not None:
             _set_config_remarks(it["cfg"], new)
+        remember(it['cfg'], it['scope'])
     for it in text_items:
         new = _match_rename(it["addr"], it["name"], it["renames"])
         if new is not None:
             it["link"] = _apply_name(it["link"], new)
+        remember(it['link'], it['scope'])
 
     # Прямые ключи → строки ссылок с заданным именем.
     key_links = [_apply_name(k["link"], k.get("name") or "") for k in keys if (k.get("link") or "").strip()]
+    for key in keys:
+        if (key.get('link') or '').strip():
+            remember(_apply_name(key['link'], key.get('name') or ''), source_scope(key))
 
     # Ноды-группы: каждая непустая корзина → один конфиг с балансером; членов вне корзин
     # и неконвертируемых отдаём отдельными ссылками (passthrough), не теряя.
@@ -1091,6 +1115,10 @@ def build_merged_response(route, spec, announce=""):
         group_configs.extend(cfgs)
         group_pass.extend(leftover)
         group_pass.extend(skipped)
+        for value in cfgs:
+            remember(value, 'group:' + str(g.get('id') or g.get('name')), fixed=bool(g.get('auto')))
+        for value in leftover + skipped:
+            remember(value, 'group:' + str(g.get('id') or g.get('name')))
         infos.extend(g_infos)
         for k, v in g_pass.items():
             passthrough.setdefault(k, v)
@@ -1105,6 +1133,7 @@ def build_merged_response(route, spec, announce=""):
         router_configs.append(_wrap_as_router(
             rt.get("targets") or {}, rt.get("rules") or [],
             rt.get("default_target") or "direct", unsafe_name(rt.get("name")) if rt.get("unsafe") else rt.get("name") or "", rt.get("params")))
+        remember(router_configs[-1], 'router:' + str(rid), fixed=True)
 
     have_json = bool(json_items) or bool(group_configs) or bool(router_configs)   # балансер/роутер форсят JSON
     out_configs = [it["cfg"] for it in json_items]
@@ -1120,7 +1149,11 @@ def build_merged_response(route, spec, announce=""):
         for link in flat:
             ob, name = _link_to_outbound(link)
             if ob:
-                extra.append(_wrap_as_config(ob, name))
+                cfg = _wrap_as_config(ob, name)
+                extra.append(cfg)
+                if origins is not None:
+                    for origin in list(origins.get(selection_value_key(link), [])):
+                        remember(cfg, origin['scope'], origin['fixed'])
             else:
                 skipped.append(link)
         if skipped:

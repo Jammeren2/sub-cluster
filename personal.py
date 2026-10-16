@@ -5,6 +5,7 @@ SQLite transactions serialize first-device claims. Never elect a replacement own
 on an outage: doing so without consensus would permit a second device binding.
 """
 from contextlib import contextmanager
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -16,6 +17,8 @@ import sqlite3
 import time
 import urllib.parse
 import urllib.request
+import unicodedata
+from collections import Counter
 
 import subscriptions as subs
 import database
@@ -114,7 +117,7 @@ def notice(name, message, output_format='legacy'):
     return body, headers
 
 
-def catalog(body):
+def catalog(body, origins=None):
     """Identify complete output entries, keeping routers/balancers indivisible."""
     try:
         parsed = json.loads(body)
@@ -128,6 +131,12 @@ def catalog(body):
         if not isinstance(item, (str, dict)):
             continue
         name = (item.get('remarks') or item.get('ps') or 'VPN') if isinstance(item, dict) else subs._frag_name(item)
+        if not name and isinstance(item, str) and item.lower().startswith('vmess://'):
+            try:
+                encoded = item[8:].split('#', 1)[0]
+                name = json.loads(base64.b64decode(encoded + '=' * (-len(encoded) % 4))).get('ps') or ''
+            except (ValueError, TypeError, AttributeError):
+                pass
         raw = json.dumps(item, sort_keys=True, ensure_ascii=False) if isinstance(item, dict) else item
         if isinstance(item, str) and str(name).startswith('Небезопасный · '):
             # Exit-country changes must not invalidate an existing selection.
@@ -137,7 +146,22 @@ def catalog(body):
         if key in seen:
             continue
         seen.add(key)
-        result.append({'id': key, 'name': str(name or 'VPN')[:200], 'value': item, 'unsafe': str(name).startswith('Небезопасный · ')})
+        entry = {'id': key, 'name': str(name or 'VPN')[:200], 'value': item, 'unsafe': str(name).startswith('Небезопасный · ')}
+        provenance = (origins or {}).get(subs.selection_value_key(item), [])
+        # Open-source lists reuse country labels for unrelated hosts. Never match
+        # these, unnamed entries, or ambiguous origins by display name alone.
+        normalized = ' '.join(unicodedata.normalize('NFC', str(name or '')).casefold().split())
+        if not entry['unsafe'] and len(provenance) == 1 and (normalized not in ('', 'vpn') or provenance[0]['fixed']):
+            origin = provenance[0]
+            entry['_identity'] = hashlib.sha256(json.dumps(
+                [origin['scope'], '' if origin['fixed'] else normalized], ensure_ascii=False).encode()).hexdigest()
+        result.append(entry)
+    counts = Counter(item.get('_identity') for item in result)
+    for item in result:
+        if counts[item.get('_identity')] > 1:
+            identity = item.pop('_identity', None)
+            if identity:
+                item['_ambiguous_identity'] = identity
     return result[:1000]
 
 
@@ -187,6 +211,50 @@ class Registry:
                 db.execute("ALTER TABLE personal_links ADD COLUMN contact TEXT NOT NULL DEFAULT ''")
             db.execute('CREATE INDEX IF NOT EXISTS personal_slug_nocase ON personal_links(route,slug COLLATE NOCASE)')
             db.execute('CREATE TABLE IF NOT EXISTS personal_limits (bucket TEXT PRIMARY KEY, since REAL NOT NULL, count INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS personal_choices (route TEXT NOT NULL, identity TEXT NOT NULL, choice TEXT NOT NULL, PRIMARY KEY(route,identity))')
+            db.execute('CREATE TABLE IF NOT EXISTS personal_choice_aliases (route TEXT NOT NULL, old_id TEXT NOT NULL, choice TEXT NOT NULL, PRIMARY KEY(route,old_id))')
+            db.execute('CREATE TABLE IF NOT EXISTS personal_ambiguous_choices (route TEXT NOT NULL, identity TEXT NOT NULL, PRIMARY KEY(route,identity))')
+
+    @staticmethod
+    def _resolve_selection(db, route, selected):
+        aliases = dict(db.execute('SELECT old_id,choice FROM personal_choice_aliases WHERE route=?', (route,)).fetchall())
+        return list(dict.fromkeys(aliases.get(key, key) for key in selected))
+
+    def resolve_selection(self, route, selected):
+        with self.connect() as db:
+            return self._resolve_selection(db, route, selected)
+
+    def stabilize_catalog(self, route, items):
+        """Keep the first observed ID for each source/name; remember old content hashes.
+
+        Alias history permits existing selections to migrate when their exact old
+        entry is observed. No credentials or full VPN configurations are stored here.
+        """
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            choices = dict(db.execute('SELECT identity,choice FROM personal_choices WHERE route=?', (route,)).fetchall())
+            aliases = dict(db.execute('SELECT old_id,choice FROM personal_choice_aliases WHERE route=?', (route,)).fetchall())
+            blocked = {row[0] for row in db.execute('SELECT identity FROM personal_ambiguous_choices WHERE route=?', (route,))}
+            ambiguous = {item['_ambiguous_identity'] for item in items if item.get('_ambiguous_identity')}
+            db.executemany('INSERT INTO personal_ambiguous_choices(route,identity) VALUES(?,?) ON CONFLICT(route,identity) DO NOTHING', [(route, identity) for identity in ambiguous - blocked])
+            blocked.update(ambiguous)
+            new_choices, new_aliases = [], []
+            for item in items:
+                identity = item.get('_identity')
+                if not identity or identity in blocked:
+                    continue
+                old_id = item['id']
+                if identity not in choices:
+                    choices[identity] = old_id
+                    new_choices.append((route, identity, old_id))
+                choice = choices[identity]
+                if old_id not in aliases:
+                    aliases[old_id] = choice
+                    new_aliases.append((route, old_id, choice))
+                item['id'] = choice
+            db.executemany('INSERT INTO personal_choices(route,identity,choice) VALUES(?,?,?) ON CONFLICT(route,identity) DO NOTHING', new_choices)
+            db.executemany('INSERT INTO personal_choice_aliases(route,old_id,choice) VALUES(?,?,?) ON CONFLICT(route,old_id) DO NOTHING', new_aliases)
+        return items
 
     @contextmanager
     def connect(self):
@@ -245,7 +313,7 @@ class Registry:
                     raise PersonalError('Нужна секретная ссылка управления, полученная при создании.', 403)
                 if selected is not None:
                     db.execute('UPDATE personal_links SET selected=? WHERE route=? AND slug=?', (json.dumps(selected), route, slug))
-                return {'name': row[0], 'contact': row[4], 'selected': selected if selected is not None else json.loads(row[1]), 'bound': bool(row[3])}
+                return {'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, selected if selected is not None else json.loads(row[1])), 'bound': bool(row[3])}
             if not hwid or len(hwid) > 256:
                 raise PersonalError(DEVICE_REQUIRED, 403)
             digest = hashlib.sha256(hwid.encode()).hexdigest()
@@ -253,4 +321,4 @@ class Registry:
                 raise PersonalError(DEVICE_MESSAGE, 403)
             if not row[3] and claim:
                 db.execute('UPDATE personal_links SET device_hash=? WHERE route=? AND slug=? AND device_hash=""', (digest, route, slug))
-            return {'name': row[0], 'contact': row[4], 'selected': json.loads(row[1]), 'bound': bool(row[3]) or claim}
+            return {'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, json.loads(row[1])), 'bound': bool(row[3]) or claim}

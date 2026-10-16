@@ -617,12 +617,23 @@ def resolve_links_spec(store, route):
 
 
 def mark_unsafe(spec, cfg):
+    node_meta = cfg.get('node_meta') or {}
     unsafe_urls = {s.get("url", "").strip() for s in cfg.get("sources", []) if source_checks.is_unsafe(s)}
+    source_ids = {}
+    key_ids = {}
+    for source in cfg.get('sources', []):
+        if source.get('url'):
+            source_ids.setdefault(source['url'].strip(), []).append(source.get('id', ''))
+        for key in _node_keys(source, node_meta) or []:
+            key_ids.setdefault(key['link'], []).append(source.get('id', ''))
     def mark(value):
         if isinstance(value, list):
             return any([mark(x) for x in value])
         if not isinstance(value, dict):
             return False
+        ids = source_ids.get(value.get('url')) or key_ids.get(value.get('link'))
+        if ids:
+            value['source_id'] = sorted(ids)[0]
         unsafe = value.get("url") in unsafe_urls or any([mark(x) for x in value.values()])
         if unsafe and any(key in value for key in ("url", "subs", "targets", "routers")):
             value["unsafe"] = True
@@ -769,10 +780,10 @@ def _resolve_proc(proc_node, node_meta, incoming, src_by_id, routes_by_id=None):
                     ex["renames"].extend(renames)
     if _is_autoselect_node(proc_node, node_meta):
         params = (_node_autoselect(proc_node, node_meta) or {}).get("params") or {}
-        return {"name": proc_node.get("label") or "", "params": params,
+        return {"id": proc_node.get('id'), "name": proc_node.get("label") or "", "params": params,
                 "auto": True, "buckets": [], "subs": g_subs, "keys": g_keys}
     gdef = _node_group(proc_node, node_meta) or {}
-    return {"name": proc_node.get("label") or "", "params": gdef.get("params") or {},
+    return {"id": proc_node.get('id'), "name": proc_node.get("label") or "", "params": gdef.get("params") or {},
             "buckets": gdef.get("buckets") or [], "subs": g_subs, "keys": g_keys}
 
 

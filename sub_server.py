@@ -122,11 +122,16 @@ def personal_operation(route, payload, remote=False):
             if other["path"].casefold() == candidate.casefold() or other["path"].casefold().startswith(candidate.casefold() + '/'):
                 raise personal.PersonalError("Это название занято другим маршрутом.", 409)
     spec = graph.resolve_links_spec(STORE, route)
+    origins = spec['_personal_origins'] = {}
     # Normalize mirrors through the merger so JSON and base64 catalogs have one shape.
     body, headers = subs.build_route_response({**route, "mode": "merge"}, spec, route.get("announce", ""))
-    items = personal.catalog(body)
+    items = PERSONAL.stabilize_catalog(route['id'], personal.catalog(body, origins))
+    if details:
+        details['selected'] = PERSONAL.resolve_selection(route['id'], details['selected'])
     if op in ("create", "update"):
         selected = payload.get("selected")
+        if isinstance(selected, list) and all(isinstance(x, str) for x in selected):
+            selected = PERSONAL.resolve_selection(route['id'], selected)
         valid = {item["id"] for item in items}
         previous = set(details['selected']) if op == 'update' else set()
         if not isinstance(selected, list) or len(selected) > 1000 or any(not isinstance(x, str) or x not in valid | previous for x in selected):

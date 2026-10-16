@@ -57,6 +57,105 @@ class PersonalTests(unittest.TestCase):
     def create(self, slug=None):
         return server.PERSONAL.create(self.route['id'], 'Alice', slug or '', [self.catalog[0]['id']])
 
+    def stable_catalog(self, spec):
+        spec = {**spec, '_personal_origins': {}}
+        body, _ = subs.build_route_response({**self.route, 'mode': 'merge'}, spec)
+        return server.PERSONAL.stabilize_catalog(self.route['id'], personal.catalog(body, spec['_personal_origins']))
+
+    def test_provider_rotation_preserves_legacy_choice_and_management(self):
+        upstream = 'https://provider.example/sub'
+        graph.add_route(server.STORE, self.path+'-upstream', 'Provider', [upstream], 'merge', access='private')
+        self.route = graph.get_routes(server.STORE)[-1]
+        current = [LINK1]
+        def fetch(source):
+            return subs._b64list(current), {}
+        with patch.object(subs, 'fetch_source', side_effect=fetch):
+            legacy = personal.catalog(subs._b64list(current))[0]['id']
+            link = server.PERSONAL.create(self.route['id'], 'Alice', '', [legacy])
+            request = {'op': 'fetch', 'slug': link['slug'], 'device': {'hwid': 'rotation-phone'}, 'claim': False}
+            server.personal_operation(self.route, request)  # establish old hash -> source/name
+            current[:] = [LINK1.replace('aaaaaaaa', 'cccccccc').replace('one.example:443', 'new.example:8443')]
+            result = server.personal_operation(self.route, request)
+            self.assertEqual(subs.extract_links(base64.b64decode(result['body'])), current)
+            manage = server.personal_operation(self.route, {'op': 'manage', 'slug': link['slug'], 'token': link['token']})
+            self.assertEqual(manage['selected'], [manage['items'][0]['id']])
+            current[:] = []
+            server.personal_operation(self.route, request)
+            data = graph.get_graph(server.STORE)
+            source = next(s for s in data['sources'] if s.get('url') == upstream)
+            source['url'] = 'https://provider.example/replaced-token'
+            self.assertTrue(graph.save_graph(server.STORE, data)[0])
+            self.route = next(r for r in graph.get_routes(server.STORE) if r['id']==self.route['id'])
+            current[:] = [LINK1.replace('one.example:443', 'third.example:2053')]
+            result = server.personal_operation(self.route, request)
+            self.assertEqual(subs.extract_links(base64.b64decode(result['body'])), current)
+            # A second registry (another process using the same database) sees the mapping.
+            registry = personal.Registry(server.PERSONAL.db_file)
+            self.assertEqual(registry.access(self.route['id'], link['slug'], token=link['token'])['selected'], [legacy])
+
+    def test_same_name_is_scoped_to_source_and_not_protocol_or_address(self):
+        spec = {'subs': [{'url': 'https://one.example/sub', 'source_id': 'one'}, {'url': 'https://two.example/sub', 'source_id': 'two'}], 'keys': []}
+        links = {'one': LINK1, 'two': LINK2.replace('#Two', '#One')}
+        with patch.object(subs, 'fetch_source', side_effect=lambda s: (subs._b64list([links[s['source_id']]]), {})):
+            original = self.stable_catalog(spec)
+            self.assertEqual(len({x['id'] for x in original}), 2)
+            links['one'] = 'trojan://new-secret@changed.example:8443?security=tls#ONE'
+            spec['subs'][0]['url'] = 'https://one.example/new-token'
+            rotated = self.stable_catalog(spec)
+            self.assertEqual([x['id'] for x in original], [x['id'] for x in rotated])
+            self.assertEqual([x['value'] for x in rotated if x['id']==original[0]['id']], [links['one']])
+
+    def test_duplicate_names_never_start_matching_after_one_disappears(self):
+        spec = {'subs': [{'url': 'https://duplicate.example/sub', 'source_id': 'duplicate'}], 'keys': []}
+        links = [LINK1]
+        with patch.object(subs, 'fetch_source', side_effect=lambda s: (subs._b64list(links), {})):
+            first = self.stable_catalog(spec)[0]['id']
+            links.append(LINK2.replace('#Two', '#One'))
+            self.assertEqual(len({x['id'] for x in self.stable_catalog(spec)}), 2)
+            links[:] = [links[1]]
+            self.assertNotEqual(self.stable_catalog(spec)[0]['id'], first)
+
+    def test_json_group_and_flat_to_json_conversion_keep_identity(self):
+        spec = {'subs': [{'url': 'https://provider.example/sub', 'source_id': 'json-source'}], 'keys': []}
+        body = [subs._b64list([LINK1])]
+        with patch.object(subs, 'fetch_source', side_effect=lambda s: (body[0], {})):
+            first = self.stable_catalog(spec)[0]['id']
+            # Adding a router changes the wire representation of flat links to JSON.
+            spec['routers'] = [{'id': 'router-stable', 'name': 'Routing', 'targets': {}, 'rules': []}]
+            result = self.stable_catalog(spec)
+            self.assertEqual(next(x['id'] for x in result if x['name']=='One'), first)
+            router_id = next(x['id'] for x in result if x['name']=='Routing')
+            spec['routers'][0]['name'] = 'Renamed router'
+            spec['routers'][0]['rules'] = [{'match': {'kind': 'domain', 'value': 'example.org'}, 'target': 'direct'}]
+            result = self.stable_catalog(spec)
+            self.assertEqual(next(x['id'] for x in result if x['name']=='Renamed router'), router_id)
+            body[0] = json.dumps([subs._wrap_as_config(subs._link_to_outbound(LINK1)[0], 'One')]).encode()
+            self.assertEqual(next(x['id'] for x in self.stable_catalog(spec) if x['name']=='One'), first)
+
+    def test_unsafe_and_unnamed_entries_do_not_match_by_name(self):
+        spec = {'subs': [{'url': 'https://public.example/sub', 'source_id': 'public'}], 'keys': []}
+        for suffix in ('', '#VPN', '#Небезопасный%20%C2%B7%20US'):
+            links = [LINK1.split('#')[0]+suffix]
+            with patch.object(subs, 'fetch_source', side_effect=lambda s: (subs._b64list(links), {})):
+                old = self.stable_catalog(spec)[0]['id']
+                links[0] = links[0].replace('one.example', 'other.example')
+                self.assertNotEqual(self.stable_catalog(spec)[0]['id'], old)
+
+    def test_vmess_embedded_name_survives_rotation(self):
+        spec = {'subs': [{'url': 'https://vmess.example/sub', 'source_id': 'vmess'}], 'keys': []}
+        config = {'ps': 'Europe', 'add': 'old.example', 'port': '443', 'id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'}
+        def fetch(source):
+            link = 'vmess://' + base64.b64encode(json.dumps(config).encode()).decode()
+            return subs._b64list([link]), {}
+        with patch.object(subs, 'fetch_source', side_effect=fetch):
+            old = self.stable_catalog(spec)[0]
+            config.update(add='new.example', port='8443', id='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+            new = self.stable_catalog(spec)[0]
+            self.assertEqual((old['id'], old['name']), (new['id'], 'Europe'))
+            self.assertNotEqual(old['value'], new['value'])
+
+
+
     def test_selection_survives_partial_catalog_save_and_return(self):
         ids = [item['id'] for item in self.catalog]
         link = server.PERSONAL.create(self.route['id'], 'Alice', '', ids)

@@ -30,13 +30,25 @@ class SharedDatabaseTests(unittest.TestCase):
         self.ca = source_checks.Checker('unused', self.a)
         self.cb = source_checks.Checker('unused', self.b)
         with database.connect('') as db:
-            for table in ('personal_links','personal_limits','device_seen','admin_sessions','source_observations'):
+            for table in ('personal_links','personal_limits','personal_choices','personal_choice_aliases','personal_ambiguous_choices','device_seen','admin_sessions','source_observations'):
                 db.execute('DELETE FROM ' + table)
             for schema in (self.ca.schema, self.cb.schema):
                 for table in ('checked_links','checked_sources'):
                     db.execute('DELETE FROM ' + schema + '.' + table)
         self.a.put('config', store.DEFAULT_CONFIG)
         self.a.put('members', store.DEFAULT_MEMBERS)
+
+    def test_stable_choices_shared_between_nodes_and_concurrent_registration(self):
+        def catalog(value):
+            return [{'id': value, '_identity': 'provider-and-name', 'name': 'Server'}]
+        old = self.ra.stabilize_catalog('rotation', catalog('old-hash'))[0]['id']
+        link = self.ra.create('rotation', 'Alice', 'phone', [old])
+        values = ['new-hash-'+str(i) for i in range(8)]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            ids = list(pool.map(lambda value: self.rb.stabilize_catalog('rotation', catalog(value))[0]['id'], values))
+        self.assertEqual(set(ids), {old})
+        self.assertEqual(self.rb.resolve_selection('rotation', values), [old])
+        self.assertEqual(self.rb.access('rotation', link['slug'], token=link['token'])['selected'], [old])
 
     def test_parallel_config_updates_are_not_lost_and_rollback(self):
         def increment(i):
@@ -213,6 +225,8 @@ admin.serve_forever()
                 legacy=store.Store(path,origin='migration-test')
                 registry=personal.Registry(path)
                 item=registry.create('migrated','Alice','phone',['id'],contact='@alice')
+                registry.stabilize_catalog('migrated', [{'id': 'id', '_identity': 'source-name'}])
+                registry.stabilize_catalog('migrated', [{'id': 'new-id', '_identity': 'source-name'}])
                 registry.access('migrated','phone',hwid='bound-device')
                 legacy.record_device('migrated','bound-device','','','',personal_name='Alice',personal_contact='@alice')
                 check=source_checks.Checker(path,legacy)
@@ -226,6 +240,7 @@ admin.serve_forever()
             self.assertEqual(migrate_shared_db.import_snapshot(path,'migration-test'),'imported')
             self.assertEqual(migrate_shared_db.import_snapshot(path,'migration-test'),'already imported')
             self.assertEqual(self.rb.access('migrated','phone',token=item['token'])['contact'],'@alice')
+            self.assertEqual(self.rb.resolve_selection('migrated', ['new-id']), ['id'])
             with self.assertRaises(personal.PersonalError):
                 self.rb.access('migrated','phone',hwid='other-device')
             self.assertEqual(self.b.get_stats()['migrated']['requests'],1)
