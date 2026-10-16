@@ -113,7 +113,7 @@ def personal_operation(route, payload, remote=False):
         if STORE.is_device_blocked(route["id"], device.get("hwid", ""), device.get("ip", "")):
             body, headers = subs.build_blocked_response(payload.get("format", "legacy"))
             return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers}
-        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=False)
+        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=False, allow_unauthenticated=route.get("allow_unauthenticated", False))
     if op == "create":
         personal.verify_turnstile(payload.get("captcha"), payload.get("hostname", ""))
         # Reserve only suffixes that cannot shadow another configured route.
@@ -148,7 +148,7 @@ def personal_operation(route, payload, remote=False):
         details = PERSONAL.access(route["id"], slug, token=payload.get("token") or "", selected=selected)
     if op == "fetch":
         # Claim only after materializing the subscription. Transaction rechecks races.
-        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=payload.get("claim", True) and any(item["id"] in details["selected"] for item in items))
+        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=payload.get("claim", True) and any(item["id"] in details["selected"] for item in items), allow_unauthenticated=route.get("allow_unauthenticated", False))
         title = (route.get("title") or route["path"]) + " ● Личная"
         body, headers = personal.selected_response(items, details["selected"], headers, payload.get("format", "legacy"), title)
         if any(item['id'] in details['selected'] for item in items):
@@ -541,6 +541,7 @@ class AdminHandler(_Base):
         if path == "/":
             editor_graph = graph.get_graph(STORE)
             for source in editor_graph["sources"]:
+                source["traffic"] = subs.source_traffic(source.get("url", ""))
                 if source_checks.is_unsafe(source):
                     source["unsafe"] = True
                     source["check_status"] = SOURCE_CHECKER.status(source.get("url", ""))
@@ -645,7 +646,7 @@ class AdminHandler(_Base):
             except Exception as e:
                 self._json(502, {"ok": False, "error": f"upstream: {e}"})
             else:
-                self._json(200, {"ok": True, "links": links})
+                self._json(200, {"ok": True, "links": links, "traffic": subs.source_traffic(url)})
             return
 
         if not self._session():
@@ -954,7 +955,7 @@ class SubHandler(_Base):
             subscription_url = base.rstrip('/') + route['path']
             message = personal.OPEN_MESSAGE + '\n\nСсылка подписки: ' + subscription_url
             body, headers = personal.notice('Откройте в браузере', message, output_format)
-        elif STORE.get_settings().get('require_device_hwid', True) and not personal.exempt_client_ip(d['ip'], CLUSTER.all_nodes(), CLUSTER.public_ip) and not personal.has_device_hwid(d['hwid']):
+        elif not route.get('allow_unauthenticated', False) and STORE.get_settings().get('require_device_hwid', True) and not personal.exempt_client_ip(d['ip'], CLUSTER.all_nodes(), CLUSTER.public_ip) and not personal.has_device_hwid(d['hwid']):
             body, headers = personal.notice('Используйте другой VPN-клиент', personal.HWID_MESSAGE, output_format)
         elif slug:
             try:

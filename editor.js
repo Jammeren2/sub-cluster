@@ -185,6 +185,12 @@
     return inp;
   }
 
+  function trafficText(t){
+    if(!t)return 'Трафик: провайдер не передал лимит или источник ещё не загружен';
+    const size=n=>{const units=['Б','КиБ','МиБ','ГиБ','ТиБ'];let i=0;while(n>=1024&&i<units.length-1){n/=1024;i++;}return n.toLocaleString('ru-RU',{maximumFractionDigits:2})+' '+units[i];};
+    const used=(t.upload||0)+(t.download||0);
+    return 'Трафик: '+size(used)+(t.total>0?' из '+size(t.total)+' · осталось '+size(Math.max(0,t.total-used)):' · лимит не указан')+(t.expire>0?' · до '+new Date(t.expire*1000).toLocaleDateString('ru-RU'):'');
+  }
   function makeSource(s){
     s.type = s.type || 'source';
     const n=el('div','node src'); n.style.left=s.x+'px'; n.style.top=s.y+'px';
@@ -200,6 +206,7 @@
     const checkHelp=el('div','hint','В подписку попадут только проверенные серверы. Цель — проверять все поддерживаемые ссылки раз в 30 минут. Страну определяем через VPN. Счётчики обновляются при перезагрузке страницы.');checkHelp.hidden=!s.unsafe;bd.appendChild(checkHelp);
     url.addEventListener('input',()=>{trust.disabled=url.value.trim()==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';if(trust.disabled){s.unsafe=true;trust.checked=true;}checkHelp.hidden=!s.unsafe;});
     if(s.check_status){const st=s.check_status;bd.appendChild(el('div','hint',st.error||('Работают в кластере: '+st.working+' · на этом узле: '+(st.local_working??st.working)+' / '+st.total+' · ожидают: '+st.pending+' · ошибки: '+st.failed+' · пропущены: '+st.unsupported+' · пора проверить: '+(st.due||0)+(st.per_minute?' · '+st.per_minute+'/мин':'')+(st.eta_minutes!=null?' · очередь ≈ '+st.eta_minutes+' мин':''))));}
+    const traffic=el('div','hint',trafficText(s.traffic));traffic.dataset.trafficSource=s.id;bd.appendChild(traffic);
     // переименование отдельных ссылок внутри подписки
     const det=el('details'); det.appendChild(el('summary',null,'Переименовать ссылки'));
     const box=el('div','linkbox');
@@ -495,6 +502,7 @@
       .then(r=>r.json().then(j=>({ok:r.ok,j})))
       .then(({ok,j})=>{ btn.disabled=false; btn.textContent='Обновить ссылки';
         if(!j||!j.ok){ btn.textContent=prev; showToast('Не удалось: '+((j&&j.error)||'ошибка'),true); return; }
+        s.traffic=j.traffic;const quota=[...world.querySelectorAll('[data-traffic-source]')].find(x=>x.dataset.trafficSource===s.id);if(quota)quota.textContent=trafficText(j.traffic);
         renderRenameRows(s,box,j.links||[]); })
       .catch(()=>{ btn.disabled=false; btn.textContent=prev; showToast('Сервер недоступен',true); });
   }
@@ -526,6 +534,8 @@
       bd.appendChild(ds);
       domWarn=el('div','muted'); domWarn.style.color='#ffb86b'; domWarn.style.fontSize='12px'; bd.appendChild(domWarn);
     }
+    const authLabel=el('label');const auth=el('input');auth.type='checkbox';auth.style.width='auto';auth.checked=!!r.allow_unauthenticated;auth.addEventListener('change',()=>{r.allow_unauthenticated=auth.checked;markDirty();});authLabel.append(auth,document.createTextNode(' Разрешить без авторизации (HWID / клиент)'));bd.appendChild(authLabel);
+    bd.appendChild(el('div','hint','Отключает проверку HWID и привязку личной ссылки к устройству на этом маршруте.'));
     // текст под подпиской (announce — показывается в клиенте)
     const det=el('details'); det.appendChild(el('summary',null,'Текст под подпиской (announce)'));
     const ta=el('textarea'); ta.value=r.announce||''; ta.placeholder='Бот — @mybot\nПоддержка — https://...'; ta.addEventListener('input',()=>{ r.announce=ta.value; markDirty(); }); det.appendChild(ta); bd.appendChild(det);
@@ -631,7 +641,7 @@
     });
     const payload={
       sources:G.sources.map(s=>({id:s.id,url:s.url||'',label:s.label||'',unsafe:!!s.unsafe,type:s.type||'source',x:Math.round(s.x),y:Math.round(s.y)})),
-      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',access:r.access||'public',enabled:r.enabled!==false,announce:r.announce||'',domain_id:r.domain_id||'',x:Math.round(r.x),y:Math.round(r.y)})),
+      routes:G.routes.map(r=>({id:r.id,title:r.title||'',path:r.path||'',mode:r.mode||'merge',access:r.access||'public',allow_unauthenticated:!!r.allow_unauthenticated,enabled:r.enabled!==false,announce:r.announce||'',domain_id:r.domain_id||'',x:Math.round(r.x),y:Math.round(r.y)})),
       edges:G.edges.map(e=>({from:e.from,to:e.to})),
       node_meta:node_meta
     };

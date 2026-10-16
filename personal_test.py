@@ -154,7 +154,27 @@ class PersonalTests(unittest.TestCase):
             self.assertEqual((old['id'], old['name']), (new['id'], 'Europe'))
             self.assertNotEqual(old['value'], new['value'])
 
+    def test_route_auth_bypass_preserves_device_binding_and_management_secret(self):
+        link = self.create()
+        server.PERSONAL.access(self.route['id'], link['slug'], hwid='original-device')
+        graph.update_route(server.STORE, self.route['id'], allow_unauthenticated=True)
+        route = graph.get_routes(server.STORE)[0]
+        result = server.personal_operation(route, {'op': 'fetch', 'slug': link['slug'], 'device': {}})
+        self.assertTrue(subs.extract_links(base64.b64decode(result['body'])))
+        with self.assertRaises(personal.PersonalError):
+            server.PERSONAL.access(route['id'], link['slug'], token='wrong')
+        with self.assertRaises(personal.PersonalError):
+            server.PERSONAL.access(route['id'], link['slug'], hwid='different-device')
+        self.assertTrue(server.PERSONAL.access(route['id'], link['slug'], hwid='original-device')['bound'])
+        data = graph.get_graph(server.STORE)
+        self.assertTrue(graph.save_graph(server.STORE, data)[0])
+        self.assertTrue(graph.get_routes(server.STORE)[0]['allow_unauthenticated'])
 
+    def test_provider_quota_reads_cached_headers_without_fetch(self):
+        url = 'https://quota.example/sub'
+        with patch.dict(subs._cache, {url: {'ts': 123, 'headers': {'subscription-userinfo': 'upload=100; download=200; total=1000; expire=1900000000'}, 'body': b''}}):
+            self.assertEqual(subs.source_traffic(url), {'upload': 100, 'download': 200, 'total': 1000, 'expire': 1900000000, 'updated_at': 123})
+        self.assertIsNone(subs.source_traffic('https://unknown.example/sub'))
 
     def test_selection_survives_partial_catalog_save_and_return(self):
         ids = [item['id'] for item in self.catalog]

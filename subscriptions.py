@@ -231,6 +231,17 @@ def fetch_upstream(url):
         return raw, headers
 
 
+def source_traffic(url):
+    """Read provider quota metadata without triggering network calls on editor load."""
+    with _cache_lock:
+        entry = _cache.get(url)
+        if not entry:
+            return None
+        headers = entry.get('headers') or {}
+        value = next((v for k, v in headers.items() if k.lower() == 'subscription-userinfo'), '')
+        info = {k: v for k, v in _parse_userinfo(value).items()
+                if k in ('upload', 'download', 'total', 'expire') and v >= 0}
+        return {**info, 'updated_at': entry['ts']} if info else None
 
 
 def fetch_upstream_cached(url):

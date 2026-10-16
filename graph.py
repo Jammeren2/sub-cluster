@@ -915,6 +915,8 @@ def update_route(store, route_id, **fields):
                     r["access"] = "private" if fields["access"] == "private" else "public"
                     if r["access"] == "private" and not r.get("personal_owner"):
                         r["personal_owner"] = store.origin
+                if "allow_unauthenticated" in fields:
+                    r["allow_unauthenticated"] = bool(fields["allow_unauthenticated"])
                 if "announce" in fields:
                     r["announce"] = _norm_announce(fields["announce"])
                 if "enabled" in fields:
@@ -1054,6 +1056,7 @@ def save_graph(store, data):
         routes.append({
             "id": rid, "path": path, "title": title, "mode": mode,
             "enabled": enabled, "upstreams": [], "domain_id": did,
+            "allow_unauthenticated": bool(r.get("allow_unauthenticated", current_routes.get(rid, {}).get("allow_unauthenticated", False))),
             "announce": _norm_announce(r.get("announce")),
             "access": "private" if r.get("access", current_routes.get(rid, {}).get("access")) == "private" else "public",
             "personal_owner": current_routes.get(rid, {}).get("personal_owner") or (store.origin if r.get("access", current_routes.get(rid, {}).get("access")) == "private" else ""),

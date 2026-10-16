@@ -297,7 +297,7 @@ class Registry:
             raise PersonalError('Это название ссылки уже занято. Выберите другое.', 409)
         return {'slug': slug, 'token': token, 'name': name, 'contact': contact, 'selected': selected}
 
-    def access(self, route, slug, *, token=None, hwid=None, selected=None, claim=True):
+    def access(self, route, slug, *, token=None, hwid=None, selected=None, claim=True, allow_unauthenticated=False):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             matches = db.execute('SELECT name,selected,manage_hash,device_hash,contact,slug FROM personal_links WHERE route=? AND slug=? COLLATE NOCASE', (route, slug)).fetchall()
@@ -314,6 +314,8 @@ class Registry:
                 if selected is not None:
                     db.execute('UPDATE personal_links SET selected=? WHERE route=? AND slug=?', (json.dumps(selected), route, slug))
                 return {'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, selected if selected is not None else json.loads(row[1])), 'bound': bool(row[3])}
+            if allow_unauthenticated:
+                return {'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, json.loads(row[1])), 'bound': bool(row[3])}
             if not hwid or len(hwid) > 256:
                 raise PersonalError(DEVICE_REQUIRED, 403)
             digest = hashlib.sha256(hwid.encode()).hexdigest()
