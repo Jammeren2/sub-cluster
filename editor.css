@@ -142,3 +142,5 @@ body.unblur .blur{filter:none;cursor:auto}
   border:1px solid #444;padding:11px 18px;border-radius:9px;z-index:100;display:none;font-size:13px;max-width:80%}
 #toast.err{border-color:#7a2a2a;background:#3a1d1d;color:#ffb0b0}
 #toast.ok{border-color:#2a5a34;background:#16321f;color:#9fe6ad}
+
+.quota-row{display:flex;align-items:center;gap:6px;margin-top:6px}.quota-row .cnt{margin:0;flex:1}.quota-refresh{padding:2px 6px;font-size:13px;line-height:1.2;background:transparent;border:0;color:#9a9aa2;cursor:pointer}.quota-refresh:hover{color:#b6ebd8}

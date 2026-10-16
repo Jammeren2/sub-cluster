@@ -624,7 +624,7 @@ class AdminHandler(_Base):
             return
 
         # graph/preview — скачать подписку и вернуть её ссылки (для UI-переименования)
-        if path == "/graph/preview":
+        if path in ("/graph/preview", "/graph/traffic"):
             sess = self._session()
             if not sess:
                 self._json(401, {"ok": False, "error": "Сессия истекла"})
@@ -639,6 +639,10 @@ class AdminHandler(_Base):
                 self._json(400, {"ok": False, "error": why})
                 return
             try:
+                if path == "/graph/traffic":
+                    subs.fetch_upstream_cached(url)
+                    self._json(200, {"ok": True, "traffic": subs.source_traffic(url)})
+                    return
                 unsafe = source_checks.is_unsafe({"url": url}) or any(source_checks.is_unsafe(s) and s.get("url", "").strip() == url for s in STORE.get_config().get("sources", []))
                 links = subs.preview_subscription(url, body=SOURCE_CHECKER.body(url)[0] if unsafe else None)
             except urllib.error.HTTPError as e:

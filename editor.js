@@ -185,11 +185,21 @@
     return inp;
   }
 
+  const quotaQueue=[];let quotaActive=0;
+  function queueQuota(s,target){
+    const url=(s.url||'').trim();if(!/^https?:\/\//i.test(url))return;
+    quotaQueue.push(async()=>{
+      try{const response=await fetch(ADMIN+'/graph/traffic',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF},body:JSON.stringify({url})});const data=await response.json();if(s.url.trim()!==url||!target.isConnected)return;if(!response.ok||!data.ok)throw Error();s.traffic=data.traffic;target.textContent=trafficText(data.traffic);target.title=data.traffic?'Данные провайдера':'Провайдер не передал Subscription-Userinfo';}
+      catch(e){if(target.isConnected&&s.url.trim()===url){target.textContent=s.traffic?trafficText(s.traffic):'Трафик: —';target.title='Не удалось обновить';}}
+      finally{redrawWires();}
+    });pumpQuota();
+  }
+  function pumpQuota(){while(quotaActive<3&&quotaQueue.length){quotaActive++;quotaQueue.shift()().finally(()=>{quotaActive--;pumpQuota();});}}
   function trafficText(t){
-    if(!t)return 'Трафик: провайдер не передал лимит или источник ещё не загружен';
+    if(!t)return 'Трафик: —';
     const size=n=>{const units=['Б','КиБ','МиБ','ГиБ','ТиБ'];let i=0;while(n>=1024&&i<units.length-1){n/=1024;i++;}return n.toLocaleString('ru-RU',{maximumFractionDigits:2})+' '+units[i];};
     const used=(t.upload||0)+(t.download||0);
-    return 'Трафик: '+size(used)+(t.total>0?' из '+size(t.total)+' · осталось '+size(Math.max(0,t.total-used)):' · лимит не указан')+(t.expire>0?' · до '+new Date(t.expire*1000).toLocaleDateString('ru-RU'):'');
+    return size(used)+' / '+(t.total>0?size(t.total):t.total===0?'∞':'—')+(t.expire>0?' · '+new Date(t.expire*1000).toLocaleDateString('ru-RU'):'');
   }
   function makeSource(s){
     s.type = s.type || 'source';
@@ -201,12 +211,14 @@
     bd.appendChild(el('label',null,'Ссылка-подписка (upstream)'));
     const url=el('input','mono'); url.value=s.url||''; url.placeholder='https://сервер/sub/xxxx'; mask(url); url.addEventListener('input',()=>{ s.url=url.value; markDirty(); }); bd.appendChild(url);
     const trustLabel=el('label'); const trust=el('input'); trust.type='checkbox'; trust.style.width='auto'; trust.checked=!!s.unsafe; trust.disabled=s.url==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';
-    trust.addEventListener('change',()=>{s.unsafe=trust.checked;checkHelp.hidden=!s.unsafe;markDirty();});
-    trustLabel.append(trust,document.createTextNode(' Небезопасный источник · проверять серверы'));bd.appendChild(trustLabel);
-    const checkHelp=el('div','hint','В подписку попадут только проверенные серверы. Цель — проверять все поддерживаемые ссылки раз в 30 минут. Страну определяем через VPN. Счётчики обновляются при перезагрузке страницы.');checkHelp.hidden=!s.unsafe;bd.appendChild(checkHelp);
-    url.addEventListener('input',()=>{trust.disabled=url.value.trim()==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';if(trust.disabled){s.unsafe=true;trust.checked=true;}checkHelp.hidden=!s.unsafe;});
-    if(s.check_status){const st=s.check_status;bd.appendChild(el('div','hint',st.error||('Работают в кластере: '+st.working+' · на этом узле: '+(st.local_working??st.working)+' / '+st.total+' · ожидают: '+st.pending+' · ошибки: '+st.failed+' · пропущены: '+st.unsupported+' · пора проверить: '+(st.due||0)+(st.per_minute?' · '+st.per_minute+'/мин':'')+(st.eta_minutes!=null?' · очередь ≈ '+st.eta_minutes+' мин':''))));}
-    const traffic=el('div','hint',trafficText(s.traffic));traffic.dataset.trafficSource=s.id;bd.appendChild(traffic);
+    trust.addEventListener('change',()=>{s.unsafe=trust.checked;markDirty();});
+    trustLabel.append(trust,document.createTextNode(' Небезопасный источник'));bd.appendChild(trustLabel);
+    url.addEventListener('input',()=>{trust.disabled=url.value.trim()==='https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt';if(trust.disabled){s.unsafe=true;trust.checked=true;}});
+    if(s.check_status){const st=s.check_status;const status=el('div','cnt',st.error?'Проверка: ошибка':'Работают: '+st.working+' / '+st.total);status.title=st.error||('Ожидают: '+st.pending+' · ошибки: '+st.failed+' · пропущены: '+st.unsupported);bd.appendChild(status);}
+    const traffic=el('div','cnt',trafficText(s.traffic));traffic.dataset.trafficSource=s.id;const quotaRow=el('div','quota-row');quotaRow.appendChild(traffic);bd.appendChild(quotaRow);
+    const refreshQuota=el('button','quota-refresh','↻');refreshQuota.type='button';refreshQuota.title='Обновить трафик';refreshQuota.addEventListener('click',e=>{e.stopPropagation();queueQuota(s,traffic);});quotaRow.appendChild(refreshQuota);
+    let quotaTimer;url.addEventListener('input',()=>{s.traffic=null;traffic.textContent='Трафик: —';clearTimeout(quotaTimer);quotaTimer=setTimeout(()=>queueQuota(s,traffic),800);});
+    queueMicrotask(()=>queueQuota(s,traffic));
     // переименование отдельных ссылок внутри подписки
     const det=el('details'); det.appendChild(el('summary',null,'Переименовать ссылки'));
     const box=el('div','linkbox');
@@ -517,9 +529,7 @@
     const p=el('input','mono'); p.value=r.path||''; p.placeholder='/custom/custom'; mask(p); bd.appendChild(p);
     bd.appendChild(el('label',null,'Доступ к подписке'));
     const access=el('select'); [['public','Общественная'],['private','Личная · 1 устройство']].forEach(([value,label])=>{ const option=el('option',null,label); option.value=value; option.selected=(r.access||'public')===value; access.appendChild(option); });
-    const personalHelp=el('div','cnt');
-    function refreshAccessHelp(){personalHelp.hidden=access.value!=='private';personalHelp.textContent='Личная ссылка = 1 HWID. Владелец: '+(r.personal_owner||'текущий узел')+'. Выдача зависит от доступности владельца; для создания нужен Turnstile.';}
-    access.addEventListener('change',()=>{ r.access=access.value; refreshAccessHelp(); markDirty(); }); bd.appendChild(access); bd.appendChild(personalHelp); refreshAccessHelp();
+    access.addEventListener('change',()=>{r.access=access.value;markDirty();});bd.appendChild(access);
     bd.appendChild(el('label',null,'Режим'));
     const sel=el('select'); [['merge','Слияние'],['mirror','Зеркало']].forEach(m=>{ const o=el('option',null,m[1]); o.value=m[0]; if((r.mode||'merge')===m[0])o.selected=true; sel.appendChild(o); }); sel.addEventListener('change',()=>{ r.mode=sel.value; markDirty(); }); bd.appendChild(sel);
     // домен (на каком отдаётся) — показываем, только если домены настроены
@@ -534,8 +544,7 @@
       bd.appendChild(ds);
       domWarn=el('div','muted'); domWarn.style.color='#ffb86b'; domWarn.style.fontSize='12px'; bd.appendChild(domWarn);
     }
-    const authLabel=el('label');const auth=el('input');auth.type='checkbox';auth.style.width='auto';auth.checked=!!r.allow_unauthenticated;auth.addEventListener('change',()=>{r.allow_unauthenticated=auth.checked;markDirty();});authLabel.append(auth,document.createTextNode(' Разрешить без авторизации (HWID / клиент)'));bd.appendChild(authLabel);
-    bd.appendChild(el('div','hint','Отключает проверку HWID и привязку личной ссылки к устройству на этом маршруте.'));
+    const authLabel=el('label');const auth=el('input');auth.type='checkbox';auth.style.width='auto';auth.checked=!!r.allow_unauthenticated;auth.addEventListener('change',()=>{r.allow_unauthenticated=auth.checked;markDirty();});authLabel.append(auth,document.createTextNode(' Без авторизации'));bd.appendChild(authLabel);
     // текст под подпиской (announce — показывается в клиенте)
     const det=el('details'); det.appendChild(el('summary',null,'Текст под подпиской (announce)'));
     const ta=el('textarea'); ta.value=r.announce||''; ta.placeholder='Бот — @mybot\nПоддержка — https://...'; ta.addEventListener('input',()=>{ r.announce=ta.value; markDirty(); }); det.appendChild(ta); bd.appendChild(det);
