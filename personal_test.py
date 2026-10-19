@@ -57,6 +57,41 @@ class PersonalTests(unittest.TestCase):
     def create(self, slug=None):
         return server.PERSONAL.create(self.route['id'], 'Alice', slug or '', [self.catalog[0]['id']])
 
+    def test_retained_output_survives_partial_empty_response_and_restart(self):
+        ids = [x['id'] for x in self.catalog]
+        link = server.PERSONAL.create(self.route['id'], 'Alice', '', ids)
+        payload = {'op':'fetch', 'slug':link['slug'], 'device':{'hwid':'retention-device'}, 'claim':False}
+        server.personal_operation(self.route, payload)
+        with patch.object(subs, 'build_route_response', return_value=(subs._b64list([LINK2]), {})):
+            result = server.personal_operation(self.route, payload)
+            self.assertEqual(set(subs.extract_links(base64.b64decode(result['body']))), {LINK1, LINK2})
+        fresh = personal.Registry(server.PERSONAL.db_file)
+        with patch.object(server, 'PERSONAL', fresh), patch.object(subs, 'build_route_response', return_value=(b'', {})):
+            result = server.personal_operation(self.route, payload)
+            self.assertEqual(set(subs.extract_links(base64.b64decode(result['body']))), {LINK1, LINK2})
+
+    def test_retention_does_not_restore_removed_graph_or_unsafe_servers(self):
+        items = [{'id':'safe','name':'Safe','value':LINK1}, {'id':'unsafe','name':'Unsafe','value':LINK2,'unsafe':True}]
+        registry = server.PERSONAL
+        registry.retained_catalog(self.route['id'], 'scope1', items)
+        retained = registry.retained_catalog(self.route['id'], 'scope1', [])
+        self.assertEqual([x['id'] for x in retained], ['safe'])
+        self.assertFalse(retained[0]['available'])
+        self.assertEqual(registry.retained_catalog(self.route['id'], 'scope2', []), [])
+
+    def test_always_all_persists_and_includes_new_servers(self):
+        link = self.create()
+        result = server.personal_operation(self.route, {'op':'update','slug':link['slug'],'token':link['token'], 'selected':link['selected'], 'always_all':True})
+        self.assertTrue(result['always_all'])
+        fresh = personal.Registry(server.PERSONAL.db_file)
+        self.assertTrue(fresh.access(self.route['id'], link['slug'], token=link['token'])['always_all'])
+        payload = {'op':'fetch','slug':link['slug'],'device':{'hwid':'all-device'},'claim':False}
+        result = server.personal_operation(self.route, payload)
+        self.assertEqual(set(subs.extract_links(base64.b64decode(result['body']))), {LINK1,LINK2})
+        server.personal_operation(self.route, {'op':'update','slug':link['slug'],'token':link['token'], 'selected':link['selected'], 'always_all':False})
+        result = server.personal_operation(self.route, payload)
+        self.assertEqual(len(subs.extract_links(base64.b64decode(result['body']))), 1)
+
     def stable_catalog(self, spec):
         spec = {**spec, '_personal_origins': {}}
         body, _ = subs.build_route_response({**self.route, 'mode': 'merge'}, spec)

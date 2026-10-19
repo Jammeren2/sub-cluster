@@ -122,13 +122,18 @@ def personal_operation(route, payload, remote=False):
             if other["path"].casefold() == candidate.casefold() or other["path"].casefold().startswith(candidate.casefold() + '/'):
                 raise personal.PersonalError("Это название занято другим маршрутом.", 409)
     spec = graph.resolve_links_spec(STORE, route)
+    scope = hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     origins = spec['_personal_origins'] = {}
     # Normalize mirrors through the merger so JSON and base64 catalogs have one shape.
     body, headers = subs.build_route_response({**route, "mode": "merge"}, spec, route.get("announce", ""))
     items = PERSONAL.stabilize_catalog(route['id'], personal.catalog(body, origins))
+    items = PERSONAL.retained_catalog(route['id'], scope, items)
     if details:
         details['selected'] = PERSONAL.resolve_selection(route['id'], details['selected'])
     if op in ("create", "update"):
+        always_all = payload.get("always_all", (details or {}).get("always_all", False))
+        if not isinstance(always_all, bool):
+            raise personal.PersonalError("Некорректный режим выбора.")
         selected = payload.get("selected")
         if isinstance(selected, list) and all(isinstance(x, str) for x in selected):
             selected = PERSONAL.resolve_selection(route['id'], selected)
@@ -144,11 +149,13 @@ def personal_operation(route, payload, remote=False):
         if not selected or len(selected) > 1000:
             raise personal.PersonalError("Выберите хотя бы один сервер (не более 1000).")
         if op == "create":
-            return {"ok": True, **PERSONAL.create(route["id"], payload.get("name"), slug, selected, contact=payload.get("contact"))}
-        details = PERSONAL.access(route["id"], slug, token=payload.get("token") or "", selected=selected)
+            return {"ok": True, **PERSONAL.create(route["id"], payload.get("name"), slug, selected, contact=payload.get("contact"), always_all=always_all)}
+        details = PERSONAL.access(route["id"], slug, token=payload.get("token") or "", selected=selected, always_all=always_all)
     if op == "fetch":
         # Claim only after materializing the subscription. Transaction rechecks races.
-        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=payload.get("claim", True) and any(item["id"] in details["selected"] for item in items), allow_unauthenticated=route.get("allow_unauthenticated", False))
+        details = PERSONAL.access(route["id"], slug, hwid=device.get("hwid", ""), claim=payload.get("claim", True) and any(item["id"] in details["selected"] or (details.get("always_all") and not item.get("unsafe")) for item in items), allow_unauthenticated=route.get("allow_unauthenticated", False))
+        if details.get("always_all"):
+            details["selected"] = list(dict.fromkeys(details["selected"] + [item["id"] for item in items if not item.get("unsafe")]))
         title = (route.get("title") or route["path"]) + " ● Личная"
         body, headers = personal.selected_response(items, details["selected"], headers, payload.get("format", "legacy"), title)
         if any(item['id'] in details['selected'] for item in items):
@@ -158,7 +165,7 @@ def personal_operation(route, payload, remote=False):
             if announce:
                 headers['Announce'] = subs._b64_header(announce)
         return {"ok": True, "body": base64.b64encode(body).decode(), "headers": headers, "personal_name": details["name"], "personal_contact": details.get("contact", "")}
-    return {"ok": True, "items": [{"id": item["id"], "name": item["name"], "unsafe": item.get("unsafe", False)} for item in items],
+    return {"ok": True, "items": [{"id": item["id"], "name": item["name"], "unsafe": item.get("unsafe", False), "available": item.get("available", True)} for item in items],
             "configured": bool(os.environ.get('TURNSTILE_SITE_KEY') and os.environ.get('TURNSTILE_SECRET_KEY')),
             **(details or {})}
 

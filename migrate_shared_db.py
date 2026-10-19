@@ -73,13 +73,13 @@ def import_snapshot(path, node, authoritative=False):
                     raise ValueError('Conflicting stable personal choices; resolve snapshots before migration')
                 db.execute('INSERT INTO ' + table + '(' + ','.join(fields) + ') VALUES(' + ','.join('?' for _ in fields) + ') ON CONFLICT(route,' + key + ') DO NOTHING', tuple(row[field] for field in fields))
         for row in data['personal_links']:
-            row = {**row, 'contact': row.get('contact', '')}
+            row = {**row, 'contact': row.get('contact', ''), 'always_all': row.get('always_all', 0)}
             existing = db.execute('SELECT * FROM personal_links WHERE route=? AND slug=? COLLATE NOCASE', (row['route'], row['slug'])).fetchall()
             if existing:
                 if len(existing) != 1 or any(existing[0].get(k) != v for k, v in row.items()):
                     raise ValueError('Conflicting personal link; resolve snapshots before migration')
                 continue
-            fields = ('route','slug','name','selected','manage_hash','device_hash','created','contact')
+            fields = ('route','slug','name','selected','manage_hash','device_hash','created','contact','always_all')
             db.execute('INSERT INTO personal_links(' + ','.join(fields) + ') VALUES(' + ','.join('?' for _ in fields) + ')', tuple(row[k] for k in fields))
         for row in data['personal_limits']:
             db.execute('INSERT INTO personal_limits(bucket,since,count) VALUES(?,?,?) ON CONFLICT(bucket) DO UPDATE SET since=GREATEST(personal_limits.since,excluded.since),count=personal_limits.count+excluded.count', (row['bucket'], row['since'], row['count']))

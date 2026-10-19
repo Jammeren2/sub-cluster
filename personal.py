@@ -22,6 +22,7 @@ from collections import Counter
 
 import subscriptions as subs
 import database
+import secretbox
 
 EXEMPT_IPS = {"37.193.168.134", "90.189.209.31"}
 HWID_MESSAGE = "Ваш VPN-клиент не передаёт корректный HWID устройства или использует IP вместо него. Используйте другой VPN-клиент, например Happ."
@@ -172,7 +173,16 @@ def selected_response(items, selected, headers, output_format, title):
     result_headers = dict(headers)
     result_headers['Cache-Control'] = 'no-store'
     result_headers['Profile-Title'] = subs._b64_header(title)
-    if isinstance(values[0], dict):
+    if any(isinstance(value, dict) for value in values):
+        configs = []
+        for value in values:
+            if isinstance(value, dict):
+                configs.append(value)
+            else:
+                outbound, name = subs._link_to_outbound(value)
+                if outbound:
+                    configs.append(subs._wrap_as_config(outbound, name))
+        values = configs
         body = json.dumps(values, ensure_ascii=False).encode()
         result_headers['Content-Type'] = 'application/json; charset=utf-8'
     else:
@@ -209,6 +219,9 @@ class Registry:
             columns = {row[1] for row in db.execute("PRAGMA table_info(personal_links)")}
             if "contact" not in columns:
                 db.execute("ALTER TABLE personal_links ADD COLUMN contact TEXT NOT NULL DEFAULT ''")
+            if "always_all" not in columns:
+                db.execute("ALTER TABLE personal_links ADD COLUMN always_all INTEGER NOT NULL DEFAULT 0")
+            db.execute('CREATE TABLE IF NOT EXISTS personal_catalog_cache (route TEXT NOT NULL, scope TEXT NOT NULL, choice TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(route,scope,choice))')
             db.execute('CREATE INDEX IF NOT EXISTS personal_slug_nocase ON personal_links(route,slug COLLATE NOCASE)')
             db.execute('CREATE TABLE IF NOT EXISTS personal_limits (bucket TEXT PRIMARY KEY, since REAL NOT NULL, count INTEGER NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS personal_choices (route TEXT NOT NULL, identity TEXT NOT NULL, choice TEXT NOT NULL, PRIMARY KEY(route,identity))')
@@ -256,6 +269,35 @@ class Registry:
             db.executemany('INSERT INTO personal_choice_aliases(route,old_id,choice) VALUES(?,?,?) ON CONFLICT(route,old_id) DO NOTHING', new_aliases)
         return items
 
+    def retained_catalog(self, route, scope, items):
+        """Keep last observed trusted entries across partial/empty upstream responses.
+
+        Scope changes when the configured graph changes, so removed sources cannot
+        leak back through cached output. Unsafe public proxies are never restored.
+        """
+        current = {item['id']: item for item in items}
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM personal_catalog_cache WHERE route=? AND scope!=?', (route, scope))
+            previous = dict(db.execute('SELECT choice,payload FROM personal_catalog_cache WHERE route=? AND scope=?', (route, scope)).fetchall())
+            for item in items:
+                if not item.get('unsafe'):
+                    raw = json.dumps(item, ensure_ascii=False)
+                    if item['id'] in previous and secretbox.decrypt(previous[item['id']]) == raw:
+                        continue
+                    payload = secretbox.encrypt(raw)
+                    db.execute('INSERT INTO personal_catalog_cache(route,scope,choice,payload) VALUES(?,?,?,?) ON CONFLICT(route,scope,choice) DO UPDATE SET payload=excluded.payload', (route,scope,item['id'],payload))
+            rows = db.execute('SELECT choice,payload FROM personal_catalog_cache WHERE route=? AND scope=? ORDER BY choice', (route, scope)).fetchall()
+            for choice, payload in rows:
+                if choice not in current:
+                    try:
+                        item = json.loads(secretbox.decrypt(payload))
+                    except (ValueError, TypeError):
+                        continue
+                    item['available'] = False
+                    current[choice] = item
+        return list(current.values())
+
     @contextmanager
     def connect(self):
         with database.connect(self.db_file, scope='personal') as db:
@@ -272,7 +314,7 @@ class Registry:
                 raise PersonalError('Слишком много попыток. Попробуйте через час.', 429)
             db.execute('INSERT INTO personal_limits VALUES(?,?,1) ON CONFLICT(bucket) DO UPDATE SET count=count+1', (bucket, now))
 
-    def create(self, route, name, slug, selected, contact=""):
+    def create(self, route, name, slug, selected, contact="", always_all=False):
         contact = str(contact or '').strip()
         if len(contact) > 160 or any(ord(c) < 32 or ord(c) == 127 for c in contact):
             raise PersonalError('Контакт: до 160 символов, без переносов строк.')
@@ -292,15 +334,15 @@ class Registry:
                 count = db.execute('SELECT count(*) FROM personal_links WHERE route=?', (route,)).fetchone()[0]
                 if count >= 10000:
                     raise PersonalError('Лимит личных ссылок исчерпан. Обратитесь к администратору.', 409)
-                db.execute('INSERT INTO personal_links(route,slug,name,selected,manage_hash,created,contact) VALUES(?,?,?,?,?,?,?)', (route,slug,name,json.dumps(selected),digest,time.time(),contact))
+                db.execute('INSERT INTO personal_links(route,slug,name,selected,manage_hash,created,contact,always_all) VALUES(?,?,?,?,?,?,?,?)', (route,slug,name,json.dumps(selected),digest,time.time(),contact,int(always_all)))
         except sqlite3.IntegrityError:
             raise PersonalError('Это название ссылки уже занято. Выберите другое.', 409)
-        return {'slug': slug, 'token': token, 'name': name, 'contact': contact, 'selected': selected}
+        return {'slug': slug, 'token': token, 'name': name, 'contact': contact, 'selected': selected, 'always_all': bool(always_all)}
 
-    def access(self, route, slug, *, token=None, hwid=None, selected=None, claim=True, allow_unauthenticated=False):
+    def access(self, route, slug, *, token=None, hwid=None, selected=None, claim=True, allow_unauthenticated=False, always_all=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            matches = db.execute('SELECT name,selected,manage_hash,device_hash,contact,slug FROM personal_links WHERE route=? AND slug=? COLLATE NOCASE', (route, slug)).fetchall()
+            matches = db.execute('SELECT name,selected,manage_hash,device_hash,contact,slug,always_all FROM personal_links WHERE route=? AND slug=? COLLATE NOCASE', (route, slug)).fetchall()
             if len(matches) > 1:
                 raise PersonalError('Названия личных ссылок отличаются только регистром. Обратитесь к администратору.', 409)
             row = matches[0] if matches else None
@@ -311,11 +353,13 @@ class Registry:
             if token is not None:
                 if not isinstance(token, str) or not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), row[2]):
                     raise PersonalError('Нужна секретная ссылка управления, полученная при создании.', 403)
+                if always_all is not None:
+                    db.execute('UPDATE personal_links SET always_all=? WHERE route=? AND slug=?', (int(always_all),route,slug))
                 if selected is not None:
                     db.execute('UPDATE personal_links SET selected=? WHERE route=? AND slug=?', (json.dumps(selected), route, slug))
-                return {'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, selected if selected is not None else json.loads(row[1])), 'bound': bool(row[3])}
+                return {'always_all': bool(always_all if token is not None and always_all is not None else row[6]), 'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, selected if selected is not None else json.loads(row[1])), 'bound': bool(row[3])}
             if allow_unauthenticated:
-                return {'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, json.loads(row[1])), 'bound': bool(row[3])}
+                return {'always_all': bool(always_all if token is not None and always_all is not None else row[6]), 'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, json.loads(row[1])), 'bound': bool(row[3])}
             if not hwid or len(hwid) > 256:
                 raise PersonalError(DEVICE_REQUIRED, 403)
             digest = hashlib.sha256(hwid.encode()).hexdigest()
@@ -323,4 +367,4 @@ class Registry:
                 raise PersonalError(DEVICE_MESSAGE, 403)
             if not row[3] and claim:
                 db.execute('UPDATE personal_links SET device_hash=? WHERE route=? AND slug=? AND device_hash=""', (digest, route, slug))
-            return {'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, json.loads(row[1])), 'bound': bool(row[3]) or claim}
+            return {'always_all': bool(always_all if token is not None and always_all is not None else row[6]), 'name': row[0], 'contact': row[4], 'selected': self._resolve_selection(db, route, json.loads(row[1])), 'bound': bool(row[3]) or claim}
